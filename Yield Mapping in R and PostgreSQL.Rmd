@@ -1,0 +1,843 @@
+---
+title: "Yield Mapping in R and PostgreSQL"
+author: "A Farrow"
+date: "02/02/2022 - 07/02/2022"
+output:
+  html_document:  
+    theme: united
+    number_sections: yes
+    toc: yes
+    toc_float: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  dpi = 300,
+  echo = FALSE,
+  results = 'markup' ,
+  message = FALSE,
+  warning = FALSE
+)
+
+```
+
+# Introduction
+
+This document will show the different results of the different stages in the filtering and cleaning, and will also implement the different interpolation methods that were used by the team at Curtin University.
+
+I have carried out a number of filtering stages in PostgreSQL prior to analysis, interpolation and mapping in R.
+
+I will connect to the PostgreSQL database and show the results of those filtering steps, then interpolate and produce raster outputs for production.
+
+# Review of filtering in PostgreSQL
+
+I first load the libraries required and define some global options/functions. I read R_2_postgres_functions.R for functions.
+
+
+```{r libraries}
+#library(RPostgres) this conflicts with RPostgreSQL so disable
+library(gstat)
+library(RPostgreSQL)
+library(DBI)
+library(tidyverse)
+library(tibble)
+library(conflicted)
+library(sf)
+library(terra)
+library(raster)
+library(ggplot2)
+library(tibble)
+library(sp)
+library(rgdal)
+library(concaveman)
+library(kableExtra)
+
+sf_use_s2(FALSE)
+
+source("R/R_2_postgres_functions.R")
+
+# vars
+jid <- "8b5bd4f0-1b41-4588-8371-67104ee6cf68"
+wth <- 25
+out <- "data/wickstein_median.tif"
+
+```
+
+# Connect to the R_link postgres database
+
+I connect to the R_link postgres database, and list the tables.
+
+```{r db_connect}
+
+# load pg driver, get connection
+#drv <- dbDriver("PostgreSQL")
+#drv <- RPostgres::Postgres()
+#con <- dbConnect(drv, dbname = dbn, host = hst, port = prt, user = usr, password = {pwd})
+
+con <- dbConnect(
+  RPostgres::Postgres(),
+  dbname = "R_link",
+  host = "localhost",
+  port = "5432",
+  password = "wagb$^6DF",
+  user = "postgres",
+  service = NULL
+)
+
+# List tables associated with a specific schema
+dbGetQuery(con,
+           "SELECT table_name FROM information_schema.tables
+                   WHERE table_schema='data'") %>% kable(caption = "PostgreSQL Tables") %>% kable_styling("striped", full_width = T)
+
+```
+
+# Get the Yields data 
+
+Construct a SQl query to select some of the columns from the yields table from the R_link postgres database.
+
+```{r yields, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Yield Points", dev = 'png'}
+
+# query to select easting, northing, yield from pg for job
+qry <- sprintf(
+  "SELECT Yield,  err_high_yield_z,  err_high_yields,  err_out_bounds , err_geom_dupes,
+  err_zero_yields , err_null_values,  err_yield_outliers_q1, err_yield_outliers_q3,
+  err_harvest_overlaps, err_harvest_widths , err_time_lags, geom 
+                FROM DATA.YIELDS
+                WHERE Job_Id = '%s'",
+  jid
+)
+
+# fetch data from db, 
+yield_df <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(yield_df$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+yield_sdf <- st_set_geometry(yield_df, newGeom)
+
+#3. (optional) drop the character format column
+yield_sdf$geom=NULL
+
+st_crs(yield_sdf, 28350)
+
+count(yield_sdf)
+summary(yield_sdf$yield)
+cat("Standard Deviation = ", sd(yield_sdf$yield))
+
+yield_plot <- ggplot(yield_sdf) +
+  geom_sf()
+  
+yield_plot
+
+# Alternative to using postgis geom
+
+#df_sf <- st_as_sf(df, coords = c("easting", "northing"), crs = 28350)
+#df_sf <- st_as_sf(df, crs = 28350)
+
+# convert to sf
+#coordinates(df) = ~ easting + northing
+
+```
+
+# Filter the table and observe impact
+
+In each step I will remove points flagged with errors and plot with statistical summary
+
+## Null yield values
+
+```{r  filter_null, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Null Yields", dev = 'png'}
+
+yield_sdf_nulls <- dplyr::filter(yield_sdf,err_null_values ==TRUE)
+yield_sdf_no_nulls <- dplyr::filter(yield_sdf,err_null_values ==FALSE)
+
+count(yield_sdf_no_nulls)
+summary(yield_sdf_no_nulls$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_nulls$yield))
+
+
+yield_nulls_plot <- ggplot(yield_sdf_no_nulls) +
+  geom_sf(aes(group = err_null_values),
+          size = 1, colour = 'green') +
+  geom_sf(data = yield_sdf_nulls,
+          aes(group = err_null_values),
+          size = 1, colour = 'red')
+  
+yield_nulls_plot
+
+```
+
+## Zero yield values
+
+```{r filter_zero, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Zero Yields", dev = 'png'}
+
+yield_sdf_zeros <- dplyr::filter(yield_sdf_no_nulls,err_zero_yields ==TRUE)
+yield_sdf_no_zeros <- dplyr::filter(yield_sdf_no_nulls,err_zero_yields ==FALSE)
+
+count(yield_sdf_no_zeros)
+summary(yield_sdf_no_zeros$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_zeros$yield))
+
+
+yield_zeros_plot <- ggplot(yield_sdf_no_zeros) +
+  geom_sf(aes(group = err_zero_yields),
+          size = 1, colour = 'green') +
+  geom_sf(data = yield_sdf_zeros,
+          aes(group = err_zero_yields),
+          size = 1, colour = 'red')
+  
+yield_zeros_plot
+
+```
+
+## Duplicated geometry points 
+
+```{r filter_geom_dupes, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Duplicated Geometry", dev = 'png'}
+
+yield_sdf_geom_dupes <- dplyr::filter(yield_sdf_no_zeros,err_geom_dupes ==TRUE)
+yield_sdf_no_geom_dupes <- dplyr::filter(yield_sdf_no_zeros,err_geom_dupes ==FALSE)
+
+count(yield_sdf_no_geom_dupes)
+summary(yield_sdf_no_geom_dupes$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_geom_dupes$yield))
+
+
+yield_geom_dupes_plot <- ggplot(yield_sdf_no_geom_dupes) +
+  geom_sf(aes(group = err_geom_dupes),
+          size = 1, colour = 'green') +
+  geom_sf(data = yield_sdf_geom_dupes,
+          aes(group = err_geom_dupes),
+          size = 1, colour = 'red')
+  
+yield_geom_dupes_plot
+
+```
+
+## Out of bounds points 
+
+The next step is to remove yield points out of bounds. This removes points outside user-defined or auto generated boundary. If auto, points clustered into groups (50m threshold), convex hull generated on each cluster, largest hull area wins.
+
+### Convex Hull
+
+Construct a SQl query to select the convex hull table from the R_link postgres database.
+
+```{r filter_c_hull, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Out of Bounds - Convex Hull", dev = 'png'}
+
+# query to select easting, northing, yield from pg for job
+qry <- sprintf(
+  "SELECT    Geom geom    FROM DATA.c_hull")
+
+# fetch data from db, 
+c_hull_df <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(c_hull_df$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+c_hull_sdf <- st_set_geometry(c_hull_df, newGeom)
+
+#3. (optional) drop the character format column
+c_hull_sdf$geom=NULL
+
+st_crs(c_hull_sdf, 28350)
+
+c_hull_plot <- ggplot(c_hull_sdf) +
+  geom_sf()
+  
+c_hull_plot
+
+```
+
+```{r filter_out_bounds, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Out of Bounds", dev = 'png'}
+
+yield_sdf_out_bounds <- dplyr::filter(yield_sdf_no_geom_dupes,err_out_bounds ==TRUE)
+yield_sdf_no_out_bounds <- dplyr::filter(yield_sdf_no_geom_dupes,err_out_bounds ==FALSE)
+
+count(yield_sdf_no_out_bounds)
+summary(yield_sdf_no_out_bounds$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_out_bounds$yield))
+
+
+yield_out_bounds_plot <- ggplot(yield_sdf_no_out_bounds) +
+  geom_sf(
+    data = c_hull_sdf,
+    size = 2,
+    colour = 'blue',
+    fill = 'light blue'
+  ) +
+  geom_sf(aes(group = err_out_bounds),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_out_bounds,
+    aes(group = err_out_bounds),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_out_bounds_plot
+
+```
+
+
+## Implausibly high yields
+
+Here I remove yield values that are physically impossible or highly unlikely. For instance, the maximum recorded yield of wheat in Australia is 12.46t/ha, with some patches in paddocks reaching 16t/ha (https://grdc.com.au/resources-and-publications/groundcover/groundcover-132-january-february-2018/wheat-records-time-to-keep-score ). So any yield over 20t/ha could be considered unlikely, especially for rainfed systems. 
+
+```{r filter_high_yields, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "High Yields", dev = 'png'}
+
+yield_sdf_high <- dplyr::filter(yield_sdf_no_out_bounds,err_high_yields ==TRUE)
+yield_sdf_no_high <- dplyr::filter(yield_sdf_no_out_bounds,err_high_yields ==FALSE)
+
+count(yield_sdf_no_high)
+summary(yield_sdf_no_high$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_high$yield))
+
+
+yield_high_plot <- ggplot(yield_sdf_no_high) +
+  geom_sf(aes(group = err_high_yields),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_high,
+    aes(group = err_high_yields),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_high_plot
+
+```
+
+## Global Outlier Yields
+
+I first calculate the average of yields from the non-error yield values, then I compute the z-score, and compare to a threshold of +2.58 (low yields are allowed). 
+
+```{r filter_global_outlier, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Global Outliers - High Yields", dev = 'png'}
+
+yield_sdf_high_z <- dplyr::filter(yield_sdf_no_high,err_high_yield_z ==TRUE)
+yield_sdf_no_high_z <- dplyr::filter(yield_sdf_no_high,err_high_yield_z ==FALSE)
+
+count(yield_sdf_no_high_z)
+summary(yield_sdf_no_high_z$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_high_z$yield))
+
+
+yield_high_z_plot <- ggplot(yield_sdf_no_high_z) +
+  geom_sf(aes(group = err_high_yield_z),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_high_z,
+    aes(group = err_high_yield_z),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_high_z_plot
+
+```
+
+## Local Outlier Yields
+
+### Q1 
+
+```{r filter_local_outlier_q1, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Local Outliers - Q1", dev = 'png'}
+
+yield_sdf_q1 <- dplyr::filter(yield_sdf_no_high_z,err_yield_outliers_q1 ==TRUE)
+yield_sdf_no_q1 <- dplyr::filter(yield_sdf_no_high_z,err_yield_outliers_q1 ==FALSE)
+
+count(yield_sdf_no_q1)
+summary(yield_sdf_no_q1$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_q1$yield))
+
+
+yield_q1_plot <- ggplot(yield_sdf_no_q1) +
+  geom_sf(aes(group = err_yield_outliers_q1),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_q1,
+    aes(group = err_yield_outliers_q1),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_q1_plot
+
+```
+
+### Q3 
+
+```{r filter_local_outlier_q3, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Local Outliers - Q3", dev = 'png'}
+
+yield_sdf_q3 <- dplyr::filter(yield_sdf_no_q1,err_yield_outliers_q3 ==TRUE)
+yield_sdf_no_q3 <- dplyr::filter(yield_sdf_no_q1,err_yield_outliers_q3 ==FALSE)
+
+count(yield_sdf_no_q3)
+summary(yield_sdf_no_q3$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_q3$yield))
+
+
+yield_q3_plot <- ggplot(yield_sdf_no_q3) +
+  geom_sf(aes(group = err_yield_outliers_q3),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_q3,
+    aes(group = err_yield_outliers_q3),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_q3_plot
+
+```
+
+## Overlaps
+
+I remove harvest points that overlap with previously harvested lines. I use a grid with cell size = 70% of header width. The script then iterates through each harvest point in sequence. If the current harvest point falls on a cell previously reached and the point is not in sequence then it is flagged.
+
+### Grid
+
+Construct a SQl query to select the grid table from the R_link postgres database.
+
+```{r filter_overlaps_1, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Harvest Pass Overlaps - Grid", dev = 'png'}
+
+# query to select easting, northing, yield from pg for job
+qry <- sprintf(
+  "SELECT    Geom geom    FROM DATA.h_grid")
+
+# fetch data from db, 
+h_grid_df <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(h_grid_df$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+h_grid_sdf <- st_set_geometry(h_grid_df, newGeom)
+
+#3. (optional) drop the character format column
+h_grid_sdf$geom=NULL
+
+st_crs(h_grid_sdf, 28350)
+
+h_grid_plot <- ggplot(h_grid_sdf) +
+  geom_sf()
+  
+h_grid_plot
+
+```
+
+```{r filter_overlaps_2, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Harvest Pass Overlaps", dev = 'png'}
+
+yield_sdf_overlaps <- dplyr::filter(yield_sdf_no_q3,err_harvest_overlaps ==TRUE)
+yield_sdf_no_overlaps <- dplyr::filter(yield_sdf_no_q3,err_harvest_overlaps ==FALSE)
+
+count(yield_sdf_no_overlaps)
+summary(yield_sdf_no_overlaps$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_overlaps$yield))
+
+
+yield_overlaps_plot <- ggplot(yield_sdf_no_overlaps) +
+    geom_sf(
+    data = h_grid_sdf,
+    size = 0.01,
+    colour = 'light blue',
+    fill = 'blue'
+  ) +
+  geom_sf(aes(group = err_harvest_overlaps),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_overlaps,
+    aes(group = err_harvest_overlaps),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_overlaps_plot
+
+```
+
+## Harvest widths
+
+The script iterates each pass and checks if the distance to the parallel passes is < than the header. If yes and yield statistically lower (via T-Test), then flag to remove.
+
+
+```{r filter_widths, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Harvest Widths", dev = 'png'}
+
+yield_sdf_h_widths <- dplyr::filter(yield_sdf_no_overlaps,err_harvest_widths ==TRUE)
+yield_sdf_no_h_widths <- dplyr::filter(yield_sdf_no_overlaps,err_harvest_widths ==FALSE)
+
+count(yield_sdf_no_h_widths)
+summary(yield_sdf_no_h_widths$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_h_widths$yield))
+
+
+yield_h_widths_plot <- ggplot(yield_sdf_no_h_widths) +
+  geom_sf(aes(group = err_harvest_widths),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_overlaps,
+    aes(group = err_harvest_widths),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_h_widths_plot
+
+```
+
+## Time lags
+
+The script flags for removal yield points that are influenced by time lag. The script calculates the global mean and std. dev. of distance between harvest points. It then assesses the distance between each point to global via Z-Score. The script accepts user defined critical z value.
+
+```{r filter_lags, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Time Lags ", dev = 'png'}
+
+yield_sdf_time_lags <- dplyr::filter(yield_sdf_no_h_widths,err_time_lags ==TRUE)
+yield_sdf_no_time_lags <- dplyr::filter(yield_sdf_no_h_widths,err_time_lags ==FALSE)
+
+count(yield_sdf_no_time_lags)
+summary(yield_sdf_no_time_lags$yield)
+cat("Standard Deviation = ", sd(yield_sdf_no_time_lags$yield))
+
+
+yield_time_lags_plot <- ggplot(yield_sdf_no_time_lags) +
+  geom_sf(aes(group = err_time_lags),
+          size = 1,
+          colour = 'green') +
+  geom_sf(
+    data = yield_sdf_time_lags,
+    aes(group = err_time_lags),
+    size = 1,
+    colour = 'red'
+  )
+
+  
+yield_time_lags_plot
+
+```
+
+# Interpolation in R
+
+
+```{r interpolation_db_connect, results='asis'}
+# query to select easting, northing, yield from pg for job
+qry <- sprintf("SELECT ST_X(Geom) Easting, ST_Y(Geom) Northing, Yield 
+                FROM DATA.YIELDS
+                WHERE Job_Id = '%s' AND err_high_yield_z = FALSE AND   err_high_yields = FALSE AND   err_out_bounds = FALSE AND  err_geom_dupes = FALSE AND   err_zero_yields = FALSE AND  err_null_values = FALSE AND   err_yield_outliers_q1 = FALSE AND  err_yield_outliers_q3 = FALSE AND 
+  err_harvest_overlaps = FALSE AND  err_harvest_widths = FALSE AND err_time_lags = FALSE", jid)
+
+
+# fetch data from db, 
+df <- dbGetQuery(con, qry)
+
+# convert to spdf
+coordinates(df) <- ~ easting + northing
+
+wkt <- sf::st_crs(28350)[[2]]
+proj4string(df) <- sp::CRS(wkt)
+
+# create yield grid from df, add median yield and median treatment columns
+grid <- as.data.frame(spsample(df, type = "regular", offset = c(0.5, 0.5), cellsize = wth))
+grid$med_yield <- NA
+
+# rename grid columns, grid it, project it
+names(grid) <- c("easting", "northing", "med_yield")
+gridded(grid) <- c("easting", "northing")
+proj4string(grid) <- proj4string(df)
+
+
+```
+
+## Generate Median Interpolated Yield Raster
+
+There is a good post here (https://swilke-geoscience.net/post/2020-09-10-kriging_with_r/kriging/) on why I have to use sp and gstat.
+
+```{r interpolation_median_1, results='hide'}
+
+# set up krig vars
+rad <- wth	# search radius
+npt <- 10	# min number of points per search
+idx <- 0	# flag for whether value stored yet
+
+# start progress bar
+prog <- txtProgressBar(min = 0, max = ncell(grid), style = 3)
+
+
+detach(package:raster)
+library(gstat)
+
+# begin local krig
+for (i in 1 : ncell(grid)) {
+  
+  # calc distances of points to current grid cell
+  dists <- spDistsN1(pts = df, pt = grid[i, ], longlat = FALSE)
+
+  # get ids of points within radius of current grid cell
+  rad_ids <- which(dists <= rad)
+
+  if (length(rad_ids) >= npt) {
+
+    # get median yield/treatment value for current neighbourhood of points
+    med_yld <- median(df[rad_ids, ]@data$yield, na.rm = TRUE)
+
+    # add to current grid pixel value
+    grid@data[i, "med_yield"] <- med_yld
+  }
+
+  # update progress bar
+  setTxtProgressBar(prog, i)
+}
+```
+
+
+```{r interpolation_median_2, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Median Interpolation ", dev = 'png'}
+detach(package:gstat)
+library(raster)
+
+# convert to raster, get convexhull of paddock, then mask
+rast <- raster::raster(grid)
+
+# plot
+spplot(rast)
+
+# export raster
+writeRaster(rast, out, "GTiff", overwrite = TRUE)
+```
+
+## Generate IDW Interpolated Yield Raster
+
+```{r interpolation_idw, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "IDW Interpolation ", dev = 'png'}
+
+out <- "data/wickstein_idw.tif"
+
+# generate regular spatial grid
+grid2 <- as.data.frame(spsample(df, type = "regular", cellsize = wth))
+names(grid2) <- c("Easting", "Northing")
+coordinates(grid2) <- ~ Easting + Northing
+
+# make it a pixel grid
+gridded(grid2) <- TRUE
+fullgrid(grid2) <- TRUE
+
+# ensure spatial grid is in mga zone 50
+#proj4string(grid2) <- proj4string(df)
+
+proj4string(grid2) <- sp::CRS(wkt)
+
+print(proj4string(grid2))
+print(proj4string(df))
+
+
+#grid2_proj <- spTransform(grid2, CRS=CRS("+proj=utm +zone=50 +south +ellps=GRS80 +units=m +no_defs"))
+#df_proj <- spTransform(df, CRS=CRS("+proj=utm +zone=50 +south +ellps=GRS80 +units=m +no_defs"))
+
+library(gstat)
+
+# begin inverse-distance weight interpolation (play with nmin, nmax, maxdist, idp to match arcmap)
+idw <- idw(formula = yield ~ 1, locations = df, newdata = grid2, nmin = 12, nmax = 12, maxdist = 60, idp = 2)
+
+detach(package:gstat)
+
+# convert to raster, get convexhull of paddock, then mask
+rawr <- raster::raster(idw)
+hull <- concaveman(st_as_sf(df))
+rast <- mask(rawr, hull)
+
+
+# plot
+spplot(rast)
+
+# export raster
+writeRaster(rast, out, "GTiff", overwrite = TRUE)
+```
+
+
+## Global Variogram Local Kriging
+
+```{r interpolation_g_vgm_local, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Global  Variogram Local Kriging", dev = 'png'}
+
+out <- "data/wickstein_global_vgm_local.tif"
+
+library(gstat)
+
+## generate, fit variogram
+vgm <- variogram(yield ~ 1, data = df)
+fit <- fit.variogram(vgm, model = vgm("Sph"))
+
+# plot vgm and fit
+#plot(vgm, fit)
+
+# begin locak krig with global vgm
+krg <- krige(formula = yield ~ 1, locations = df, newdata = grid2, model = fit, nmin = 12, nmax = 100, maxdist = 300, block = c(100, 100))
+
+detach(package:gstat)
+
+# convert to raster, get convexhull of paddock, then mask
+rawr <- raster::raster(krg)
+rast <- mask(rawr, hull)
+
+
+# plot
+spplot(rast)
+
+# export raster
+writeRaster(rast, out, "GTiff", overwrite = TRUE)
+```
+
+## Local Variogram Local Kriging
+
+```{r interpolation_l_vgm_local, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Local Variogram Local Kriging", dev = 'png', results = 'hide'}
+
+out <- "data/wickstein_local_vgm_local.tif"
+
+# generate regular spatial grid
+grid3 <- as.data.frame(spsample(df, type = "regular", cellsize = wth))
+names(grid3) <- c("Easting", "Northing")
+gridded(grid3) <- ~ Easting + Northing
+
+proj4string(grid3) <- sp::CRS(wkt)
+
+
+# set up krig vars
+rad <- 60	# search radius
+npt <- 25	# max number of points per search
+idx <- 0	# flag for whether value stored yet
+
+# start progress bar
+prog <- txtProgressBar(min = 0, max = ncell(grid3), style = 3)
+
+library(gstat)
+
+# begin local krig
+for (i in 1 : ncell(grid3)) {
+  
+  # calc distances of points to current grid3 cell
+  dists <- spDistsN1(pts = df, pt = grid3[i, ], longlat = FALSE)
+
+  # get ids of points within radius of current grid3 cell
+  rad_ids <- which(dists < rad)
+
+  if (length(rad_ids) >= npt) {
+
+    # calc and fit local variogram with current neighbourhood of points
+    vgm <- variogram(yield ~ 1, data = df[rad_ids, ])
+    fit <- fit.variogram(vgm, model = vgm("Sph"))
+
+    # local krig for current neighbourhood of points
+    krg <- krige(formula = yield ~ 1, locations = df[rad_ids, ], newdata = grid3[i, ], model = fit, debug.level = 0)
+    # add local result to collection of krigs
+    if (idx == 0) {
+      krgs <- krg
+      idx <- 1
+    }
+    else {
+      krgs <- rbind(krgs, krg)
+    }
+  }
+
+  # update progress bar
+  setTxtProgressBar(prog, i)
+}
+
+detach(package:gstat)
+
+# convert to raster, get convexhull of paddock, then mask
+rawr <- raster::raster(krgs)
+rast <- mask(rawr, hull)
+
+# plot
+spplot(rast)
+
+# export raster
+writeRaster(rast, out, "GTiff", overwrite = TRUE)
+
+
+
+```
+
+## Local Variogram Local Auto Kriging
+
+```{r interpolation_l_vgm_local_auto, cache=TRUE, fig.height = 4, fig.width = 7, fig.cap = "Local Variogram Local Auto Kriging", dev = 'png', results = 'hide'}
+
+library("automap")
+out <- "data/wickstein_local_vgm_local_auto.tif"
+
+# generate regular spatial grid
+grid3 <- as.data.frame(spsample(df, type = "regular", cellsize = wth))
+names(grid3) <- c("Easting", "Northing")
+gridded(grid3) <- ~ Easting + Northing
+
+proj4string(grid3) <- sp::CRS(wkt)
+
+# set up krig vars
+rad <- 60	# search radius
+npt <- 25	# max number of points per search
+idx <- 0	# flag for whether value stored yet
+
+# start progress bar
+prog <- txtProgressBar(min = 0, max = ncell(grid3), style = 3)
+
+# begin local krig
+for (i in 1 : ncell(grid3)) {
+  
+  # calc distances of points to current grid cell
+  dists <- spDistsN1(pts = df, pt = grid3[i, ], longlat = FALSE)
+
+  # get ids of points within radius of current grid cell
+  rad_ids <- which(dists < rad)
+
+  if (length(rad_ids) >= npt) {
+  
+    # auto krig current grid cell and point neighbourhood
+    krg <- autoKrige(formula = yield ~ 1, input_data = df[rad_ids, ], new_data = grid3[i, ], model = "Sph", remove_duplicates = TRUE, debug.level = 0)
+
+    # add local result to collection of krigs
+    if (idx == 0) {
+      krgs <- krg$krige_output
+      idx <- 1
+    }
+    else {
+      krgs <- rbind(krgs, krg$krige_output)
+    }
+  }
+
+  # update progress bar
+  setTxtProgressBar(prog, i)
+}
+
+
+# convert to raster, get convexhull of paddock, then mask
+rawr <- raster::raster(krgs)
+rast <- mask(rawr, hull)
+
+
+# plot
+spplot(rast)
+
+# export raster
+writeRaster(rast, out, "GTiff", overwrite = TRUE)
+```
