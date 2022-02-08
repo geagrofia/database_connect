@@ -1,0 +1,61 @@
+---
+title: "Coverage Solutions in PostgreSQL and R"
+author: "A Farrow"
+date: "08/02/2022 - 08/02/2022"
+output:
+  html_document:  
+    theme: united
+    number_sections: yes
+    toc: yes
+    toc_float: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  dpi = 300,
+  echo = FALSE,
+  results = 'markup' ,
+  message = FALSE,
+  warning = FALSE
+)
+
+```
+
+
+# Objective
+
+In 2010 I published a paper that investigated the locational efficiency of agro-dealers in central Malawi. I analysed the accessibility to existing agro-dealers in a raster environment using the 'costdistance' algorithm in the ESRI Arc/INFO software.
+
+I programmed a 'greedy-add' heuristic in Arc Macro Language (AML), accessing points from shapefiles and raster grids in native ESRI format. This script will investigate how to replicate the heuristic and the accessibility analysis in a PostgreSQL/PostGIS and R environment.
+
+# Introduction
+
+Spatial analysis can help in the expansion of input stockists, especially agro-dealer networks, by assessing the coverage of existing input outlets and deriving optimum locations for these village-level input stockists. 
+
+I address three research questions: 
+
++ First, what is the locational efficiency of the current village-level stockists of inputs (CNFA-RUMARK trained network of agro-dealers and public sector)? 
+
++ Secondly, how many village-level stockists of markets are needed to reach 60% of the population in the central region of Malawi within 1 hour? 
+
++ Finally I address the potential spatial components of the sustainability of input stockists relating to the potential demand from smallholder farmers and the access to bulk supplies. 
+
+The problem of finding the optimum location for village-level stockists of markets is addressed in two stages, using spatial analysis in conjunction with location-allocation models (LAM). 
+First, the locational efficiency of the existing network of stockists of inputs (agro dealers) is determined, followed by the establishment of a set of optimal sites for village-level stockists of inputs. A final step explores the viability of stockists and calculates the population surrounding the stockists taking into account competition from other sources of inputs and the accessibility of the selected stockists to potential wholesalers who are bulk distributors of farm inputs.
+
+# Greedy add heuristic
+
+My previous approach used existing raster accessibility algorithms within a custom made heuristic for determining near optimal locations of stockists. 
+
+The first step was to assess the coverage of set I - the existing CNFA stockists. If more than 20% of the target population is uncovered, then the heuristic selects from set G until at least 80% of the population is serviced within the 1-hour threshold.
+
+The heuristic choose each stockist in set G and records the population within the 1-hour threshold and selects the stockist l with the greatest population coverage. It then recalculates the population coverage and, if the objective is not achieved, the heuristic increases the number of selected stockists from set G. After this first iteration, the search for an optimal solution ought to consider all combinations of stockists from set G. 
+
+The number of combinations is defined by n!/(n-i)!, where n is the total number of stockists and i is the number of stockists in a particular iteration. For large numbers of stockists in set I this is computationally intensive; for instance with 100 stockists in set G finding the greatest population coverage for 3 stockists gives 100 * 99 * 98 = 100!/97! = 970,200 possible combinations.
+
+I use a "greedy add" heuristic instead. Thus in the second iteration the heuristic excludes the population already covered in the first iteration and again searches for the stockist with the greatest population coverage. 
+The heuristic proceeds in this fashion until the covered population within 1 hour is 80%, at which point the model stops (Farrow, 2010).
