@@ -8,7 +8,7 @@ output:
     number_sections: yes
     toc: yes
     toc_float: true
-    toc_depth: 3
+    toc_depth: 4
 ---
 
 ```{r setup, include=FALSE}
@@ -25,6 +25,22 @@ knitr::opts_chunk$set(
 
 ```
 
+```{r libraries}
+#library(RPostgres) this conflicts with RPostgreSQL so disable
+library(RPostgreSQL)
+library(DBI)
+library(kableExtra)
+library(sf)
+library(tidyverse)
+library(raster)
+library(nominatimlite) # used for OSM API and for bounding box
+library(rasterVis) # used for plotting rasters
+
+sf_use_s2(FALSE)
+
+source("R/R_2_postgres_functions.R")
+
+```
 
 # Objective
 
@@ -47,7 +63,8 @@ I address three research questions:
 The problem of finding the optimum location for village-level stockists of markets is addressed in two stages, using spatial analysis in conjunction with location-allocation models (LAM). 
 First, the locational efficiency of the existing network of stockists of inputs (agro dealers) is determined, followed by the establishment of a set of optimal sites for village-level stockists of inputs. A final step explores the viability of stockists and calculates the population surrounding the stockists taking into account competition from other sources of inputs and the accessibility of the selected stockists to potential wholesalers who are bulk distributors of farm inputs.
 
-# Greedy add heuristic
+
+# AML 'Greedy-Add' heuristic
 
 My previous approach used existing raster accessibility algorithms within a custom made heuristic for determining near optimal locations of stockists. 
 
@@ -59,3 +76,420 @@ The number of combinations is defined by n!/(n-i)!, where n is the total number 
 
 I use a "greedy add" heuristic instead. Thus in the second iteration the heuristic excludes the population already covered in the first iteration and again searches for the stockist with the greatest population coverage. 
 The heuristic proceeds in this fashion until the covered population within 1 hour is 80%, at which point the model stops (Farrow, 2010).
+
+
+## Spatial Data
+
+Dataset name | Type | Description
+-------------|------|-------------
+Friction | grid | Values of time in seconds to cross a cell
+Boundary | grid |Defining the extent of the analysis with single value of 1
+Sumzonegrid | grid | Defining the extent of the population to be analysed with single value of 1
+Pop | grid | The uncovered population that are considered at the start of the analysis
+Totpop | grid | The total population in the area of analysis
+Test_points | shapefile | Locations that can be considered as facilities/outlets
+
+
+## AML Heuristic Steps
+
+The steps of the heuristic are specific to AML so the order may change depending on the logic of R or PostGIS.
+Nevertheless the steps indicate the main processes:
+
+1. DEFINE DIRECTORIES
+2. DEFINE POINTS COVERAGE
+3. DEFINE GRID COVERAGES
+4. GET TOTAL POPSUM IN TEST AREA AND create a variable
+5. SHAPEFILE EXTRACTION COMMAND
+6. DEFINE OTHER VARIABLES
+7. GET USER DEFINED VARIABLE VALUES
+8. DEFINE OUTPUT TABLE FOR POPULATION VALUES AND POINT NUMBER
+9. START THE ITERATIONS
+    + Select point with unique ID and create new layer
+    + Convert selected point layer to grid maintaining ID
+    + RUN COSTDISTANCE USING FRICTION GRID AND NEW TARGET GRID
+    + FIND AREA AND POPULATION WITHIN 1 HOUR
+    + COMPARE POPSUM AND RECORD POINT-ID
+    + CLEAN UP
+    + COMPARE TO TOTAL POP
+    + RERUN THE COSTDISTANCE FOR THE OPTIMUM POINT, SAVE AND DISCARD
+    + CLEAN UP
+  
+  
+# Purely PostGIS vector solution
+
+## Assess feasibility
+
+### Connect to PostgreSQL database
+
+The database has the following tables:
+
+```{r db_connect, results='markup'}
+
+con <- dbConnect(
+  RPostgres::Postgres(),
+  dbname = "R_link",
+  host = "localhost",
+  port = "5432",
+  password = "wagb$^6DF",
+  user = "postgres",
+  service = NULL
+)
+
+# List tables associated with a specific schema
+dbGetQuery(con,
+           "SELECT table_name FROM information_schema.tables
+                   WHERE table_schema='coverage'") %>% kable(caption = "Coverage PostgreSQL Tables") %>% kable_styling("striped", full_width = T)
+
+```
+
+### Get the boundary
+
+```{r boundary, , cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Boundary", dev = 'png', results='hide'}
+
+# this gets the boundary from GADM
+boundary <- getData('GADM', country = ("MWI"), level = 1) %>% st_as_sf() %>% mutate(New_ID = 1)
+
+# this transforms the boundary to the UTM projection for Malawi
+boundary_utm <- st_transform(boundary, 32736)
+
+# this writes the boundary to postgres
+st_write(obj = boundary_utm, dsn = con, Id(schema="coverage", table = "boundary_utm"))
+
+boundary_plot <- ggplot() +
+  geom_sf(data = boundary_utm)
+
+boundary_plot
+
+```
+
+
+### Get existing agro-dealer points
+
+
+This step uses the following SQL scripts:
+
++ create_table_cnfa_ag_dealers.sql
+
++ coverage_copy_csv_cnfa_ag_dealers.sql
+
++ update_geometry_cnfa_ag_dealers.sql
+
+
+
+```{r cnfa_ag_dealers, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "CNFA Agro-Dealers", dev = 'png', results='hide'}
+
+# query to select easting, northing, yield from pg for job
+qry <- sprintf(
+  "SELECT  Id, ID_ACC, CNFA_Ag_Dealer_Name,  District_Name, X,  Y,  Geom 
+                FROM COVERAGE.CNFA_AG_DEALERS"
+)
+
+# fetch data from db, 
+cnfa_ag_dealers_df <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(cnfa_ag_dealers_df$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+cnfa_ag_dealers_sdf <- st_set_geometry(cnfa_ag_dealers_df, newGeom)
+
+#3. (optional) drop the character format column
+cnfa_ag_dealers_sdf$geom=NULL
+
+st_crs(cnfa_ag_dealers_sdf, 32736)
+
+cnfa_ag_dealers_plot <- ggplot() +
+  geom_sf(data = boundary_utm) +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'green', size = 1, shape = 3)
+
+  
+cnfa_ag_dealers_plot
+
+```
+
+
+### Get potential agro-dealer points
+
+This step uses the following SQL scripts:
+
++ create_table_pot_ag_dealers.sql
+
++ create_table_pot_ag_dealers_temp.sql
+
++ coverage_copy_csv_pot_ag_dealers_temp.sql
+
++ insert_from_temp.sql
+
++ update_geometry_pot_ag_dealers.sql
+
+
+
+```{r pot_ag_dealers, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Potential Agro-Dealers", dev = 'png', results='hide'}
+
+# query to select easting, northing, yield from pg for job
+qry <- sprintf(
+  "SELECT  Id, Pot_Ag_Dealer_Name,  District_Name, Facility,  X,  Y,  Geom 
+                FROM COVERAGE.POT_AG_DEALERS"
+)
+
+# fetch data from db, 
+pot_ag_dealers_df <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(pot_ag_dealers_df$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+pot_ag_dealers_sdf <- st_set_geometry(pot_ag_dealers_df, newGeom)
+
+#3. (optional) drop the character format column
+pot_ag_dealers_sdf$geom=NULL
+
+st_crs(pot_ag_dealers_sdf, 32736)
+
+pot_ag_dealers_plot <- ggplot() +
+  geom_sf(data = boundary_utm) +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'green', size = 1, shape = 3) +
+  geom_sf(data = pot_ag_dealers_sdf, colour = 'red', size = 1, shape = 4)
+
+  
+pot_ag_dealers_plot
+
+```
+
+### Create the friction surface raster
+
+#### Mask
+
+The analysis mask is an intersection of (i) the bounding box of the x districts that comprise the central region of Malawi with (ii) the boundary of Malawi:
+
+
+```{r mask_boundary, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Mask Boundary", dev = 'png', results='hide'}
+
+bbox_central <- bbox_to_poly(st_bbox(dplyr::filter(dplyr::filter(boundary_utm, HASC_1 =="MW.DE" | HASC_1 =="MW.KS" | HASC_1 =="MW.NK" | HASC_1 =="MW.DO" | HASC_1 =="MW.MC" | HASC_1 =="MW.LI" | HASC_1 =="MW.SA" | HASC_1 =="MW.NI" | HASC_1 =="MW.NU"))), crs = 32736)
+
+
+central_mask <- st_intersection(boundary_utm, bbox_central)
+
+bbox_central_plot <- ggplot() +
+  geom_sf(data = bbox_central, colour = 'dark grey', fill = 'light grey') +
+  geom_sf(data = boundary_utm, colour = 'blue', fill = 'light blue') +
+  geom_sf(data = central_mask, colour = 'dark green', fill = 'light green')
+
+
+bbox_central_plot
+
+```
+
+The boundary mask is converted to a raster with resolution of 1km by 1km
+
+```{r mask_raster, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Mask Raster", dev = 'png', results='hide'}
+
+wkt_32736 <- sf::st_crs(32736)[[2]]
+
+e <- extent(central_mask)
+blank_raster <- raster(e, resolution = c(1000, 1000))
+proj4string(blank_raster) <- sp::CRS(wkt_32736)
+
+mask_raster <- rasterize(central_mask, blank_raster, field=1)
+mask_raster
+
+# use gplot from the rastervis package
+
+  gplot(mask_raster, maxpixels = 50000) + 
+    geom_tile(aes(fill = value), alpha = 1) +
+    #geom_tile() +
+    geom_sf(
+      data = central_mask,
+      fill = NA,
+      col = 'dark grey',
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient(low = "white",
+                        high = 'dark green',
+                        na.value = NA) +
+    #xlim(-20, 60) +
+    #ylim(-40, 40) +
+    labs(fill = "-------------\nRaster\nMask\n-------------") +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+  
+```
+
+#### Slope
+
+The slope is determined by the change in elevation.
+I download SRTM data for the central region of Malawi (from the raster package).
+
+```{r srtm_raster, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "SRTM elevation", dev = 'png', results='hide'}
+
+srtm_34_14S <- getData('SRTM', lon=34, lat=-14)
+srtm_34_16S <- getData('SRTM', lon=34, lat=-16)
+srtm_utm  <- projectRaster(merge(srtm_34_14S, srtm_34_16S), mask_raster)
+srtm_c_mwi <- crop(srtm_utm, mask_raster)
+
+# use gplot from the rastervis package
+
+  gplot(srtm_c_mwi, maxpixels = 50000) + 
+    geom_tile(aes(fill = value), alpha = 1) +
+    #geom_tile() +
+    geom_sf(
+      data = central_mask,
+      fill = NA,
+      col = 'dark grey',
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient2(low = 'green', mid = 'brown',
+                        high = 'white', midpoint = 1500,
+                        na.value = NA) +
+    #xlim(-20, 60) +
+    #ylim(-40, 40) +
+    labs(fill = "-------------\nSRTM\nElevation\n-------------") +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+
+```
+
+I then convert the elevation into slope (degrees) and then into a metre-by-metre difference.
+
+```{r slope_raster, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "SRTM slope", dev = 'png', results='hide'}
+
+
+slope_c_mwi <- terrain(srtm_c_mwi, opt="slope", unit="tangent", neighbors = 8)
+slope_c_mwi
+
+# use gplot from the rastervis package
+
+  gplot(slope_c_mwi, maxpixels = 50000) + 
+    geom_tile(aes(fill = value), alpha = 1) +
+    #geom_tile() +
+    geom_sf(
+      data = central_mask,
+      fill = NA,
+      col = 'dark grey',
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient(low = 'green',
+                        high = 'red', 
+                        na.value = NA) +
+    #xlim(-20, 60) +
+    #ylim(-40, 40) +
+    labs(fill = "-------------\nSRTM\nSlope\nm-in-m\n-------------") +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+```
+
+```{r slope_raster_resampled, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "SRTM slope (resampled)", dev = 'png', results='hide'}
+
+slopem <- resample(slope_c_mwi, mask_raster, method="bilinear") #make the same size
+slopem
+
+# use gplot from the rastervis package
+
+  gplot(slopem, maxpixels = 50000) + 
+    geom_tile(aes(fill = value), alpha = 1) +
+    #geom_tile() +
+    geom_sf(
+      data = central_mask,
+      fill = NA,
+      col = 'dark grey',
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient(low = 'green',
+                        high = 'red', 
+                        na.value = NA) +
+    #xlim(-20, 60) +
+    #ylim(-40, 40) +
+     labs(fill = "-------------\nSRTM\nSlope\nm-in-m\n-------------") +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+  
+```
+
+#### Land use
+
+```{r landuse_raster, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Copernicus Land Cover", dev = 'png', results='hide'}
+
+
+
+
+
+
+
+srtm_34_14S <- getData('SRTM', lon=34, lat=-14)
+srtm_34_16S <- getData('SRTM', lon=34, lat=-16)
+srtm_utm  <- projectRaster(merge(srtm_34_14S, srtm_34_16S), mask_raster)
+srtm_c_mwi <- crop(srtm_utm, mask_raster)
+
+# use gplot from the rastervis package
+
+  gplot(srtm_c_mwi, maxpixels = 50000) + 
+    geom_tile(aes(fill = value), alpha = 1) +
+    #geom_tile() +
+    geom_sf(
+      data = central_mask,
+      fill = NA,
+      col = 'dark grey',
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient2(low = 'green', mid = 'brown',
+                        high = 'white', midpoint = 1500,
+                        na.value = NA) +
+    #xlim(-20, 60) +
+    #ylim(-40, 40) +
+    labs(fill = "-------------\nSRTM\nElevation\n-------------") +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+
+```
+
+
+
+#### Roads
+
+
+
+
+Convert raster to centroids
+
+
+Create lines between all centroids - but order by distance and limit to the eight closest
+
+
+Run shortest path analysis from a selected agro-dealer point to all other points
+
+
+Limit results to those that are less than one hour
+
+
+
