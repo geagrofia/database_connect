@@ -32,9 +32,16 @@ library(DBI)
 library(kableExtra)
 library(sf)
 library(tidyverse)
+library(terra)
 library(raster)
 library(nominatimlite) # used for OSM API and for bounding box
 library(rasterVis) # used for plotting rasters
+library(osmdata) # used for OSM data
+library(osmar) # used for OSM data
+library(gdistance) # used for cost distance calculations
+library(cowplot) # used for plotting
+library(scales) # used for scales in plotting
+library(ggtext) # used for superscript in plotting text
 
 sf_use_s2(FALSE)
 
@@ -56,7 +63,7 @@ I address three research questions:
 
 + First, what is the locational efficiency of the current village-level stockists of inputs (CNFA-RUMARK trained network of agro-dealers and public sector)? 
 
-+ Secondly, how many village-level stockists of markets are needed to reach 60% of the population in the central region of Malawi within 1 hour? 
++ Secondly, how many village-level stockists of markets are needed to reach 80% of the population in the central region of Malawi within 1 hour? 
 
 + Finally I address the potential spatial components of the sustainability of input stockists relating to the potential demand from smallholder farmers and the access to bulk supplies. 
 
@@ -115,11 +122,9 @@ Nevertheless the steps indicate the main processes:
     + CLEAN UP
   
   
-# Purely PostGIS vector solution
+# Conventional raster distance approach
 
-## Assess feasibility
-
-### Connect to PostgreSQL database
+## Connect to PostgreSQL database
 
 The database has the following tables:
 
@@ -142,28 +147,60 @@ dbGetQuery(con,
 
 ```
 
-### Get the boundary
+## Get the country boundary
 
-```{r boundary, , cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Boundary", dev = 'png', results='hide'}
+```{r boundary_mwi, , cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Malawi Boundary", dev = 'png', results='hide'}
 
-# this gets the boundary from GADM
-boundary <- getData('GADM', country = ("MWI"), level = 1) %>% st_as_sf() %>% mutate(New_ID = 1)
+# this gets the Malawi boundary from GADM
+boundary_mwi <- getData('GADM', country = ("MWI"), level = 0) %>% st_as_sf() %>% mutate(New_ID = 1)
 
 # this transforms the boundary to the UTM projection for Malawi
-boundary_utm <- st_transform(boundary, 32736)
+boundary_mwi_utm <- st_transform(boundary_mwi, 32736)
 
-# this writes the boundary to postgres
-st_write(obj = boundary_utm, dsn = con, Id(schema="coverage", table = "boundary_utm"))
+# this writes the boundary_mwi to postgres
+st_write(obj = boundary_mwi_utm, dsn = con, Id(schema="coverage", table = "boundary_mwi_utm"))
 
-boundary_plot <- ggplot() +
-  geom_sf(data = boundary_utm)
+boundary_mwi_plot <- ggplot() +
+  geom_sf(data = boundary_mwi_utm)
 
-boundary_plot
+boundary_mwi_plot
+
+```
+
+## Get the central region boundary
+
+```{r boundary_mcr, , cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Malawi Central Region and Districts", dev = 'png', results='hide'}
+
+# this gets the Malawi districts from GADM
+boundary_mcr_dist <- getData('GADM', country = ("MWI"), level = 1) %>% st_as_sf() %>% mutate(New_ID = 1) %>%  dplyr::filter(HASC_1 =="MW.DE" | HASC_1 =="MW.KS" | HASC_1 =="MW.NK" | HASC_1 =="MW.DO" | HASC_1 =="MW.MC" | HASC_1 =="MW.LI" | HASC_1 =="MW.SA" | HASC_1 =="MW.NI" | HASC_1 =="MW.NU")
+
+# this transforms the districts to the UTM projection for Malawi
+boundary_mcr_dist_utm <- st_transform(boundary_mcr_dist, 32736)
+
+# this writes the districts to postgres
+st_write(obj = boundary_mcr_dist_utm, dsn = con, Id(schema="coverage", table = "boundary_mcr_dist_utm"))
+
+# this gets the Central Regiion boundary
+boundary_mcr_utm <- st_as_sf(st_union(boundary_mcr_dist_utm))
+
+
+boundary_mcr_dist_plot <- ggplot() +
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  )
+
+boundary_mcr_dist_plot
 
 ```
 
 
-### Get existing agro-dealer points
+## Get existing agro-dealer points
 
 
 This step uses the following SQL scripts:
@@ -176,7 +213,7 @@ This step uses the following SQL scripts:
 
 
 
-```{r cnfa_ag_dealers, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "CNFA Agro-Dealers", dev = 'png', results='hide'}
+```{r cnfa_ag_dealers, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Existing Agro-Dealers", dev = 'png', results='hide'}
 
 # query to select easting, northing, yield from pg for job
 qry <- sprintf(
@@ -202,8 +239,21 @@ cnfa_ag_dealers_sdf$geom=NULL
 st_crs(cnfa_ag_dealers_sdf, 32736)
 
 cnfa_ag_dealers_plot <- ggplot() +
-  geom_sf(data = boundary_utm) +
-  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'green', size = 1, shape = 3)
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  ) +
+  geom_sf(
+    data = cnfa_ag_dealers_sdf,
+    colour = 'dark green',
+    size = 1,
+    shape = 3
+  )
 
   
 cnfa_ag_dealers_plot
@@ -211,7 +261,7 @@ cnfa_ag_dealers_plot
 ```
 
 
-### Get potential agro-dealer points
+## Get potential agro-dealer points
 
 This step uses the following SQL scripts:
 
@@ -253,32 +303,50 @@ pot_ag_dealers_sdf$geom=NULL
 st_crs(pot_ag_dealers_sdf, 32736)
 
 pot_ag_dealers_plot <- ggplot() +
-  geom_sf(data = boundary_utm) +
-  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'green', size = 1, shape = 3) +
-  geom_sf(data = pot_ag_dealers_sdf, colour = 'red', size = 1, shape = 4)
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  ) +
+  geom_sf(
+    data = cnfa_ag_dealers_sdf,
+    colour = 'dark green',
+    size = 1,
+    shape = 3
+  ) +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    colour = 'blue',
+    size = 2,
+    shape = 1
+  )
 
-  
 pot_ag_dealers_plot
 
 ```
 
-### Create the friction surface raster
+## Create the friction surface raster
 
-#### Mask
+### Analysis Mask
 
-The analysis mask is an intersection of (i) the bounding box of the x districts that comprise the central region of Malawi with (ii) the boundary of Malawi:
+The analysis mask is an intersection of (i) the bounding box of the central region of Malawi with (ii) the boundary of Malawi.
+
+Movement is permitted across the regional boundary, but the population outside the central region will not be considered.
 
 
 ```{r mask_boundary, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Mask Boundary", dev = 'png', results='hide'}
 
-bbox_central <- bbox_to_poly(st_bbox(dplyr::filter(dplyr::filter(boundary_utm, HASC_1 =="MW.DE" | HASC_1 =="MW.KS" | HASC_1 =="MW.NK" | HASC_1 =="MW.DO" | HASC_1 =="MW.MC" | HASC_1 =="MW.LI" | HASC_1 =="MW.SA" | HASC_1 =="MW.NI" | HASC_1 =="MW.NU"))), crs = 32736)
+bbox_central <- bbox_to_poly(st_bbox(boundary_mcr_utm), crs = 32736)
 
-
-central_mask <- st_intersection(boundary_utm, bbox_central)
+central_mask <- st_intersection(boundary_mwi_utm, bbox_central)
 
 bbox_central_plot <- ggplot() +
   geom_sf(data = bbox_central, colour = 'dark grey', fill = 'light grey') +
-  geom_sf(data = boundary_utm, colour = 'blue', fill = 'light blue') +
+  geom_sf(data = boundary_mwi_utm, colour = 'blue', fill = 'light blue') +
   geom_sf(data = central_mask, colour = 'dark green', fill = 'light green')
 
 
@@ -286,7 +354,7 @@ bbox_central_plot
 
 ```
 
-The boundary mask is converted to a raster with resolution of 1km by 1km
+The analysis mask is converted to a raster with resolution of 1km by 1km
 
 ```{r mask_raster, cache=TRUE, fig.height = 7, fig.width = 4, fig.cap = "Mask Raster", dev = 'png', results='hide'}
 
@@ -301,32 +369,46 @@ mask_raster
 
 # use gplot from the rastervis package
 
-  gplot(mask_raster, maxpixels = 50000) + 
-    geom_tile(aes(fill = value), alpha = 1) +
-    #geom_tile() +
-    geom_sf(
-      data = central_mask,
-      fill = NA,
-      col = 'dark grey',
-      na.rm = TRUE,
-      inherit.aes = FALSE
-    ) +
-    scale_fill_gradient(low = "white",
-                        high = 'dark green',
-                        na.value = NA) +
-    #xlim(-20, 60) +
-    #ylim(-40, 40) +
-    labs(fill = "-------------\nRaster\nMask\n-------------") +
-    theme(
-      panel.grid.major.x = element_blank(),
-      panel.grid.minor.x = element_blank(),
-      axis.title.x = element_blank(),
-      axis.title.y = element_blank()
-    )
+gplot(mask_raster, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+  #geom_tile() +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  scale_fill_gradient(low = "white",
+                      high = 'dark green',
+                      na.value = NA) +
+  #xlim(-20, 60) +
+  #ylim(-40, 40) +
+  labs(fill = "-------------\nAnalysis\nMask\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
   
 ```
 
-#### Slope
+### Slope
 
 The slope is determined by the change in elevation.
 I download SRTM data for the central region of Malawi (from the raster package).
@@ -336,32 +418,44 @@ I download SRTM data for the central region of Malawi (from the raster package).
 srtm_34_14S <- getData('SRTM', lon=34, lat=-14)
 srtm_34_16S <- getData('SRTM', lon=34, lat=-16)
 srtm_utm  <- projectRaster(merge(srtm_34_14S, srtm_34_16S), mask_raster)
-srtm_c_mwi <- crop(srtm_utm, mask_raster)
+
+srtm_c_mwi <- (srtm_utm * mask_raster)
 
 # use gplot from the rastervis package
 
-  gplot(srtm_c_mwi, maxpixels = 50000) + 
-    geom_tile(aes(fill = value), alpha = 1) +
-    #geom_tile() +
-    geom_sf(
-      data = central_mask,
-      fill = NA,
-      col = 'dark grey',
-      na.rm = TRUE,
-      inherit.aes = FALSE
-    ) +
-    scale_fill_gradient2(low = 'green', mid = 'brown',
-                        high = 'white', midpoint = 1500,
-                        na.value = NA) +
-    #xlim(-20, 60) +
-    #ylim(-40, 40) +
-    labs(fill = "-------------\nSRTM\nElevation\n-------------") +
-    theme(
-      panel.grid.major.x = element_blank(),
-      panel.grid.minor.x = element_blank(),
-      axis.title.x = element_blank(),
-      axis.title.y = element_blank()
-    )
+gplot(srtm_c_mwi, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+  #geom_tile() +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  scale_fill_gradientn(colours = terrain.colors(10),
+                       na.value = NA) +
+  labs(fill = "-------------\nSRTM\nElevation\n(masl)\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
 
 ```
 
@@ -375,53 +469,1110 @@ slope_c_mwi
 
 # use gplot from the rastervis package
 
-  gplot(slope_c_mwi, maxpixels = 50000) + 
+gplot(slope_c_mwi, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+  #geom_tile() +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  scale_fill_gradientn(colours = rev(heat.colors(10)),
+                       na.value = NA) +
+  labs(fill = "-------------\nSRTM\nSlope\nm-in-m\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+```
+
+
+### Land use
+
+```{r landuse_raster, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Copernicus Land Cover", dev = 'png', results='hide'}
+
+
+lc_africa <- crop(raster("D:/DatosProyecto/SpatialData/Africa/biofisico/Copernicus/E020N00_PROBAV_LC100_global_v3.0.1_2019-nrt_Discrete-Classification-map_EPSG-4326.tif"), extent(c(30, 36, -20, -10))) 
+lc_africa
+unique(values(lc_africa))
+
+
+lc_utm  <- projectRaster(lc_africa, mask_raster, method="ngb")
+unique(values(lc_utm))
+
+lc_c_mwi <- (lc_utm * mask_raster)
+unique(values(lc_c_mwi))
+
+brks <- c( 0, 35, 45, 55, 85, 95, 150)
+nb <- length(brks) - 1
+cols <- colorRampPalette(c("yellow", "green", "black", "blue", "light blue", "dark green")) (nb)
+
+# use gplot from the rastervis package
+
+  gplot(lc_c_mwi, maxpixels = 50000) + 
     geom_tile(aes(fill = value), alpha = 1) +
-    #geom_tile() +
-    geom_sf(
-      data = central_mask,
-      fill = NA,
-      col = 'dark grey',
-      na.rm = TRUE,
-      inherit.aes = FALSE
-    ) +
-    scale_fill_gradient(low = 'green',
-                        high = 'red', 
-                        na.value = NA) +
-    #xlim(-20, 60) +
-    #ylim(-40, 40) +
-    labs(fill = "-------------\nSRTM\nSlope\nm-in-m\n-------------") +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+    scale_fill_gradientn( colours = cols,
+                       na.value = NA) +
+    labs(fill = "-------------\nCopernicus\nLand Cover\n-------------") +
     theme(
       panel.grid.major.x = element_blank(),
       panel.grid.minor.x = element_blank(),
       axis.title.x = element_blank(),
       axis.title.y = element_blank()
     )
+
 ```
 
-```{r slope_raster_resampled, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "SRTM slope (resampled)", dev = 'png', results='hide'}
 
-slopem <- resample(slope_c_mwi, mask_raster, method="bilinear") #make the same size
-slopem
+ https://land.copernicus.eu/global/sites/cgls.vito.be/files/products/CGLOPS1_PUM_LC100m-V3_I3.4.pdf page 28
+
+
+Copernicus land cover classes
+
+Map code | Land Cover Class | Walking speeds km/hr | Reclassification in seconds/km
+---------|------------------|----------------------|-----------------------------------
+20|Shrubs | 2 | 1800
+30|Herbaceous vegetation | 3 | 1200
+40|Cultivated and managed vegetation/agriculture (cropland) | 3 | 1200
+50|Urban / built up | 5 | 720 
+80|Permanent water bodies  | 0.1 | 36000
+90|Herbaceous wetland | 1 | 3600
+112|Closed forest, evergreen, broad leaf | 1.5 | 2400
+114|Closed forest, deciduous broad leaf | 1.5 | 2400
+116|Closed forest, unknown  | 1.5 | 2400
+124|Open forest, deciduous broad leaf | 1.5 | 2400
+126|Open forest, unknown  | 1.5 | 2400
+
+
+```{r landuse_reclassified, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Copernicus Land Cover", dev = 'png', results='hide'}
+
+
+### reclassify Land use to give a water raster
+
+lc_c_mwi_rcl_water  <-  reclassify(lc_c_mwi, matrix(c(0, 78, NA, 79,81, 1, 82, 200, NA),
+                                                                ncol = 3,
+                                                                byrow = TRUE))
+lc_c_mwi_rcl_water_df <- gplot_data(lc_c_mwi_rcl_water) # convert to geom_tile type of raster
+# multiple geom_tiles can be incorporated in a conventional ggplot
+
+
+### reclassify Land use
+
+dflc <- data.frame(
+  id = c(20,
+         30, 40, 50, 80, 90, 112, 114, 116, 124, 126),
+  values = c(1800, 1200, 1200, 720, 36000, 3600, 2400, 2400, 2400, 2400, 2400)
+)
+
+lc_c_mwi_rcl <- subs(lc_c_mwi, dflc, subsWithNA=TRUE) ## substitute and all others will be filled with NA
+
+
+brks <- c( 0, 35, 45, 55, 85, 95, 150)
+nb <- length(brks) - 1
+cols <- colorRampPalette(c("dark green", "green", "light green", "yellow", "orange", "red", "black" )) (nb)
 
 # use gplot from the rastervis package
 
-  gplot(slopem, maxpixels = 50000) + 
+  gplot(lc_c_mwi_rcl, maxpixels = 50000) + 
     geom_tile(aes(fill = value), alpha = 1) +
-    #geom_tile() +
-    geom_sf(
-      data = central_mask,
-      fill = NA,
-      col = 'dark grey',
-      na.rm = TRUE,
-      inherit.aes = FALSE
-    ) +
-    scale_fill_gradient(low = 'green',
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+    scale_fill_gradientn( colours = cols,
+                       na.value = NA) +
+    labs(fill = "-------------\nCopernicus\nLand Cover\nReclassified\n-------------") +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+
+
+
+```
+
+
+
+### Roads
+
+
+```{r osm_2_postgres, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "OSM Roads", dev = 'png', results='hide'}
+
+# OSM file pre-downloaded for Central Malawi
+# Lines exported from QGIS to geojson format
+
+## ---- RUN THIS ONCE ----
+#osm_malawi_lines <- st_read("D:/repos/database_connect/data/inputs/osm_lines.geojson")
+#osm_malawi_lines_utm <-st_transform(osm_malawi_lines, 32736)
+
+# this writes the boundary to postgres
+
+#st_write(obj = osm_malawi_lines_utm, dsn = con, Id(schema="coverage", table = "osm_malawi_lines_utm"))
+
+
+```
+
+
+```{r roads_osm, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "OSM Roads", dev = 'png', results='hide'}
+
+# query to select trunk roads
+qry <- sprintf(
+  "SELECT  osm_id, name, highway, geometry 
+                FROM COVERAGE.osm_malawi_lines_utm
+  WHERE highway = 'trunk' OR highway = 'trunk_link' OR highway = 'primary' OR highway = 'primary_link'"
+)
+
+# fetch data from db, 
+trunk_geo <- dbGetQuery(con, qry)
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(trunk_geo$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+trunk_geo_sdf <- st_set_geometry(trunk_geo, newGeom)
+
+#3. (optional) drop the character format column
+trunk_geo_sdf$geom=NULL
+st_crs(trunk_geo_sdf, 4236)
+trunk_utm_sdf <- st_transform(trunk_geo_sdf, 32736)
+trunk_utm_sdf_central <- st_intersection(central_mask, trunk_utm_sdf)
+
+
+
+# query to select secondary roads
+qry <- sprintf(
+  "SELECT  osm_id, name, highway, geometry 
+                FROM COVERAGE.osm_malawi_lines_utm
+  WHERE highway = 'secondary' OR highway = 'secondary_link' OR highway = 'tertiary' OR highway = 'tertiary_link' "
+)
+
+# fetch data from db, 
+secondary_geo <- dbGetQuery(con, qry)
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(secondary_geo$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+secondary_geo_sdf <- st_set_geometry(secondary_geo, newGeom)
+
+#3. (optional) drop the character format column
+secondary_geo_sdf$geom=NULL
+st_crs(secondary_geo_sdf, 4236)
+secondary_utm_sdf <- st_transform(secondary_geo_sdf, 32736)
+secondary_utm_sdf_central <- st_intersection(central_mask, secondary_utm_sdf)
+
+# query to select other roads
+qry <- sprintf(
+  "SELECT  osm_id, name, highway, geometry 
+                FROM COVERAGE.osm_malawi_lines_utm
+  WHERE  highway = 'track' OR highway = 'residential'"
+)
+
+# fetch data from db, 
+other_geo <- dbGetQuery(con, qry)
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <- st_as_sfc(structure(as.character(other_geo$geom), class = "WKB"),EWKB=TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+other_geo_sdf <- st_set_geometry(other_geo, newGeom)
+
+#3. (optional) drop the character format column
+other_geo_sdf$geom=NULL
+st_crs(other_geo_sdf, 4236)
+other_utm_sdf <- st_transform(other_geo_sdf, 32736)
+other_utm_sdf_central <- st_intersection(central_mask, other_utm_sdf)
+
+
+roads_utm_plot <- ggplot() +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(data = other_utm_sdf_central, colour = 'yellow') +
+  geom_sf(data = secondary_utm_sdf_central, colour = 'orange') +
+  geom_sf(data = trunk_utm_sdf_central, colour = 'red' ) +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'green', size = 1, shape = 3)
+
+roads_utm_plot
+
+```
+
+```{r vehicle_time, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "OSM Roads - Time to travel 1km in vehicle", dev = 'png', results='hide'}
+
+# Create a raster from the roads giving a value of time to cross the cell in seconds
+
+# Assume velocity of 60km/hr for trunk and primary roads
+# Assume velocity of 30km/hr for secondary and tertiary roads
+# Assume velocity of 10km/hr for other roads
+
+# terra rasterize is considerably faster than raster rasterize so convert all vector and raster inputs
+
+r_roads_t_v <- terra::rasterize(vect(trunk_utm_sdf_central), rast(mask_raster), 60)
+r_roads_s_v <- terra::rasterize(vect(secondary_utm_sdf_central), rast(mask_raster), 120)
+r_roads_o_v <- terra::rasterize(vect(other_utm_sdf_central), rast(mask_raster), 360)
+
+roads_comb_v <- raster::raster(terra::merge(r_roads_t_v, merge(r_roads_s_v, r_roads_o_v)))
+roads_comb_v
+
+gplot(roads_comb_v, maxpixels = 100000) +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_tile(aes(fill = value), alpha = 1) +
+  
+    scale_fill_gradient(low = 'red',
+                        high = 'yellow', 
+                        na.value = NA) +
+  #xlim(-20, 60) +
+  #ylim(-40, 40) +
+  labs(fill = "-------------\nTime\nVehicles\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+```
+
+```{r bicycle_time, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "OSM Roads - Time to travel 1km on bicycle", dev = 'png', results='hide'}
+
+# Create a raster from the roads giving a value of time to cross the cell in seconds
+
+# Assume velocity of 15 km/hr for trunk and primary roads
+# Assume velocity of 10 km/hr for secondary and tertiary roads
+# Assume velocity of 10 km/hr for other roads
+
+# terra rasterize is considerably faster than raster rasterize so convert all vector and raster inputs
+
+r_roads_t_b <- terra::rasterize(vect(trunk_utm_sdf_central), rast(mask_raster), 240)
+r_roads_s_b <- terra::rasterize(vect(secondary_utm_sdf_central), rast(mask_raster), 360)
+r_roads_o_b <- terra::rasterize(vect(other_utm_sdf_central), rast(mask_raster), 360)
+
+roads_comb_b <- raster::raster(terra::merge(r_roads_t_b, merge(r_roads_s_b, r_roads_o_b)))
+roads_comb_b
+
+gplot(roads_comb_b, maxpixels = 100000) +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_tile(aes(fill = value), alpha = 1) +
+  
+    scale_fill_gradient(low = 'red',
+                        high = 'yellow', 
+                        na.value = NA) +
+  #xlim(-20, 60) +
+  #ylim(-40, 40) +
+  labs(fill = "-------------\nTime\nBicycles\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+```
+
+
+```{r walking_time, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "OSM Roads - Time to travel 1km on foot", dev = 'png', results='hide'}
+
+# Create a raster from the roads giving a value of time to cross the cell in seconds
+
+# Assume velocity of 5 km/hr for trunk and primary roads
+# Assume velocity of 5 km/hr for secondary and tertiary roads
+# Assume velocity of 5 km/hr for other roads
+
+# terra rasterize is considerably faster than raster rasterize so convert all vector and raster inputs
+
+r_roads_t_w <- terra::rasterize(vect(trunk_utm_sdf_central), rast(mask_raster), 720)
+r_roads_s_w <- terra::rasterize(vect(secondary_utm_sdf_central), rast(mask_raster), 720)
+r_roads_o_w <- terra::rasterize(vect(other_utm_sdf_central), rast(mask_raster), 720)
+
+roads_comb_w <- raster::raster(terra::merge(r_roads_t_w, merge(r_roads_s_w, r_roads_o_w)))
+roads_comb_w
+
+gplot(roads_comb_w, maxpixels = 100000) +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_tile(aes(fill = value), alpha = 1) +
+  
+    scale_fill_gradient(low = 'red',
+                        high = 'yellow', 
+                        na.value = NA) +
+  #xlim(-20, 60) +
+  #ylim(-40, 40) +
+  labs(fill = "-------------\nTime\nWalking\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+```
+
+
+### Land, Roads and Slope Combined
+
+
+
+```{r vehicle_friction, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Vehicular Friction surface", dev = 'png', results='hide'}
+
+f <- function(x,y) ifelse(is.na(x), y, x)
+lc_ro_v <- overlay(roads_comb_v, lc_c_mwi_rcl, fun = f)
+lc_ro_v
+
+
+### compute vehicular friction surface
+f1 <- function(x,y) x/(exp(-3*y))  
+friction_v <- overlay(lc_ro_v, slope_c_mwi, fun = f1)
+friction_v
+
+gplot(friction_v, maxpixels = 100000) +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_tile(aes(fill = value), alpha = 1) +
+      scale_fill_gradientn( colours = cols,
+                       na.value = NA, limits = c(0,3600)) +
+  labs(fill = "-------------\nFriction\nSurface\nVehicles\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+
+```
+
+```{r bicycle_friction, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Bicycle Friction surface", dev = 'png', results='hide'}
+
+f <- function(x,y) ifelse(is.na(x), y, x)
+lc_ro_b <- overlay(roads_comb_b, lc_c_mwi_rcl, fun = f)
+lc_ro_b
+
+
+### compute vehicular friction surface
+f1 <- function(x,y) x/(exp(-3*y))  
+friction_b <- overlay(lc_ro_b, slope_c_mwi, fun = f1)
+friction_b
+
+gplot(friction_b, maxpixels = 100000) +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_tile(aes(fill = value), alpha = 1) +
+      scale_fill_gradientn( colours = cols,
+                       na.value = NA, limits = c(0,3600)) +
+  labs(fill = "-------------\nFriction\nSurface\nBicycles\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+
+```
+
+
+```{r walking_friction, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Walking Friction surface", dev = 'png', results='hide'}
+
+f <- function(x,y) ifelse(is.na(x), y, x)
+lc_ro_w <- overlay(roads_comb_w, lc_c_mwi_rcl, fun = f)
+lc_ro_w
+
+
+### compute vehicular friction surface
+f1 <- function(x,y) x/(exp(-3*y))  
+friction_w <- overlay(lc_ro_w, slope_c_mwi, fun = f1)
+friction_w
+
+gplot(friction_w, maxpixels = 100000) +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_tile(aes(fill = value), alpha = 1) +
+      scale_fill_gradientn( colours = cols,
+                       na.value = NA, limits = c(0,3600)) +
+  labs(fill = "-------------\nFriction\nSurface\nWalking\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+
+```
+
+```{r friction_2_postgres, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "OSM Roads", dev = 'png', results='hide'}
+
+
+
+# this writes the friction surfaces to postgres
+
+# vehicle friction points
+temp_points <- st_as_sf(rasterToPoints(friction_v, spatial=TRUE))
+temp_points$id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "friction_v_points"))
+
+# bicycle friction points
+temp_points <- st_as_sf(rasterToPoints(friction_b, spatial=TRUE))
+temp_points$id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "friction_b_points"))
+
+# bicycle friction raster
+temp_polys <- st_as_sf(rasterToPolygons(friction_b))
+temp_polys$id <- seq.int(nrow(temp_polys))
+
+st_write(obj = temp_polys, dsn = con, Id(schema="coverage", table = "friction_b_raster_edges"))
+
+temp_points <- distinct(dplyr::select(st_cast(st_as_sf(rasterToPolygons(friction_b)), "POINT"), -layer))
+temp_points$id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "friction_b_raster_vertices"))
+
+
+
+
+# walking friction points
+temp_points <- st_as_sf(rasterToPoints(friction_w, spatial=TRUE))
+temp_points$id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "friction_w_points"))
+
+
+```
+
+## Get the population grid
+
+```{r population_grid, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Population - Central Region Malawi", dev = 'png', results='hide'}
+
+
+# WorldPop 2020 constrained data available at: DOI : 10.5258/SOTON/WP00682
+
+pop_mwi <- crop(raster("D:/DatosProyecto/SpatialData/Africa/Pais/Malawi/WorldPop/mwi_ppp_2020_constrained.tif"), extent(c(30, 36, -20, -10))) 
+pop_mwi
+
+crs_32736 <- sp::CRS(wkt_32736)
+
+pop_mwi_utm  <- projectRaster(pop_mwi, crs = crs_32736, res=100)
+pop_mwi_utm
+
+pop_mwi_utm_agg <- aggregate(pop_mwi_utm, fact=10, fun=sum)
+pop_mwi_utm_agg
+
+
+pop_mwi_utm_rsmp  <- resample(pop_mwi_utm_agg, mask_raster, method="ngb")
+pop_mwi_utm_rsmp
+
+pop_mask_raster <- rasterize(boundary_mcr_utm, blank_raster, field=1)
+pop_mask_raster
+
+pop_mwi_utm_rsmp  <- pop_mwi_utm_rsmp * pop_mask_raster
+pop_mwi_utm_rsmp
+
+pop_mwi_utm_rsmp_df <- gplot_data(pop_mwi_utm_rsmp) # convert to geom_tile type of raster
+# multiple geom_tiles can be incorporated in a conventional ggplot
+
+pop_mwi_utm_rsmp_df
+
+total_pop <- cellStats(pop_mwi_utm_rsmp,stat='sum')
+cat("Total Population = ", total_pop)
+target_pop <- total_pop * 0.8
+cat("Target Population = ", target_pop)
+
+gplot(pop_mwi_utm_rsmp, maxpixels = 100000) +
+  geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_tile(aes(fill = value), alpha = 1) +
+  
+    scale_fill_gradient(low = 'yellow',
                         high = 'red', 
                         na.value = NA) +
-    #xlim(-20, 60) +
-    #ylim(-40, 40) +
-     labs(fill = "-------------\nSRTM\nSlope\nm-in-m\n-------------") +
+  #xlim(-20, 60) +
+  #ylim(-40, 40) +
+  labs(fill = "-------------\nPopulation\nper 1km\ngrid cell\n-------------") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+
+```
+
+```{r pop_2_postgres, cache=TRUE, results='hide'}
+
+
+# this writes the pop surface to postgres
+
+temp_points <- st_as_sf(rasterToPoints(pop_mwi_utm_rsmp, spatial=TRUE))
+temp_points$Id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "pop_mwi_points"))
+
+
+```
+
+## Vehicle accessibility analysis with existing agro-dealers
+
+### Total Time
+
+```{r vehicle_access_existing, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Vehicle Accessibility - Existing Agro-Dealers", dev = 'png', results='markup'}
+
+
+tr_v <- transition(friction_v,function(x) 1/mean(x), 8) # transition from vehicle friction
+tr_v <- geoCorrection(tr_v, scl = TRUE) # Geographic correction is necessary for all objects of the class Transition that are made with directions > 4.The function will correct for diagonal connections between grid cells (which cover a longer distance than vertical or horizontal connections).
+
+
+cnfa_ag_dealers_sp <- as_Spatial(cnfa_ag_dealers_sdf)
+
+cnfa_cost_v <- accCost(tr_v, cnfa_ag_dealers_sp)
+
+gplot(cnfa_cost_v, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'dark green', size = 0.5, shape = 3,
+      inherit.aes = FALSE) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(0,10000)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nTime to\nNGO\nAgro-\nDealers\nVehicles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+```
+### Within 1 hour
+
+```{r vehicle_access_existing_1hr, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Within 1 hour - Vehicle Accessibility - Existing Agro-Dealers", dev = 'png', results='markup'}
+
+r_cnfa_1hr_v <-  reclassify(cnfa_cost_v, matrix(c(-Inf, 3600, 1, 3600, Inf, 0),
+                                    ncol = 3,
+                                    byrow = TRUE))
+
+gplot(r_cnfa_1hr_v, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'dark green', size = 0.5, shape = 3,
+      inherit.aes = FALSE) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(1,1)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nWithin\n1 hour of\nNGO\nAgro-\nDealers by\nVehicles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+r_cnfa_pop_v <- r_cnfa_1hr_v * pop_mwi_utm_rsmp
+cnfa_pop_v <- cellStats(r_cnfa_pop_v, stat='sum')
+cat("Total Population within 1 hour of Existing Agro-Dealers by Vehicles = ", cnfa_pop_v,"\n\n")
+
+if (cnfa_pop_v < target_pop) {
+  run_heuristic_v <- TRUE
+  cat("Target Population not reached. Run the heuristic for potential agro-dealers")
+  
+} else {
+  run_heuristic_v <- FALSE
+  cat("Target Population reached. Do not run the heuristic for potential agro-dealers")
+}
+
+```
+
+## Vehicle greedy add heuristic with potential agro-dealers
+
+If the target population is not reached by the existing Existing agro-dealers then I need to consider the other potential agro-dealers.
+
+Before running the greedy add heuristic I need to check whether it is possible to reach 80% of the population from the other potential agro-dealer locations.
+
+
+### Remaining Population
+
+```{r vehicle_remaining_population, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Vehicle Accessibility - Remaining Population", dev = 'png', results='markup'}
+
+if ( run_heuristic_v == TRUE) {
+ 
+
+  r_covered_pop_v <- r_cnfa_pop_v
+  
+  # remove the already covered population from the population grid to give remaining value
+  r_remaining_pop_v <- pop_mwi_utm_rsmp - r_cnfa_pop_v
+  
+  # reclassify to show the area already covered as NA 
+  r_remaining_pop_v_rcl  <-
+    reclassify(r_remaining_pop_v, matrix(c(0, NA),
+                                         ncol = 2,
+                                         byrow = TRUE))
+  
+  r_remaining_pop_v_df <- gplot_data(r_remaining_pop_v_rcl)  # convert to geom_tile type of raster
+
+remaining_pop_v_plot <- gplot(r_remaining_pop_v, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(
+    data = cnfa_ag_dealers_sdf,
+    colour = 'dark green',
+    size = 0.5,
+    shape = 3,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    colour = 'blue',
+    size = 0.5,
+    shape = 1,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_gradient(
+    low = 'yellow',
+    high = 'red',
+    na.value = NA,
+    limits = c(0.5, 5000)
+  ) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nRemaining\nPopulation\nVehicles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+print(remaining_pop_v_plot)
+
+diff_pop_v <- cellStats(r_remaining_pop_v,stat='sum')
+cat("Target Population = ", formatC(target_pop, format="d", big.mark=","),"\n\n")
+cat("Total Population within 1 Hour = ", formatC(cnfa_pop_v, format="d", big.mark=","),"\n\n")
+cat("Total Uncovered Population = ", formatC(diff_pop_v, format="d", big.mark=","),"\n\n")
+cat("Remaining Population to Target = ", formatC((target_pop - cnfa_pop_v), format="d", big.mark=","),"\n\n")
+
+potential_pop_v <- 0
+
+}
+
+```
+
+```{r pop_rem_v_2_postgres, cache=TRUE, results='hide'}
+
+if ( run_heuristic_v == TRUE) {
+# this writes the  remaining pop surface to postgres
+
+temp_points <- st_as_sf(rasterToPoints(r_remaining_pop_v, function(x){x>0}, spatial=TRUE))
+temp_points$Id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "remaining_pop_v_points"))
+}
+
+```
+
+
+### Total Time
+
+```{r vehicle_access_potential, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Vehicle Accessibility - Potential Agro-Dealers", dev = 'png', results='hide'}
+
+if ( run_heuristic_v == TRUE) {
+  
+pot_ag_dealers_sp <- as_Spatial(pot_ag_dealers_sdf)
+
+pot_cost_v <- accCost(tr_v, pot_ag_dealers_sp)
+
+access_pot_v_plot <- gplot(pot_cost_v, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+      geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    ,
+    colour = 'blue',
+    size = 0.5,
+    shape = 1,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(0,10000)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nTime to\nnon-NGO\nPotential\nAgro-\nDealers\nVehicles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+print(access_pot_v_plot)
+
+}
+
+```
+
+### Within 1 hour
+
+```{r vehicle_access_potential_1hr, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Within 1 hour - Vehicle Accessibility - Potential Agro-Dealers", dev = 'png', results='markup'}
+
+if (run_heuristic_v == TRUE) {
+  r_pot_1hr_v <-
+    reclassify(pot_cost_v, matrix(c(-Inf, 3600, 1, 3600, Inf, 0),
+                                  ncol = 3,
+                                  byrow = TRUE))
+  
+  access_1hr_pot_v_plot <-   gplot(r_pot_1hr_v, maxpixels = 50000) +
+    geom_tile(aes(fill = value), alpha = 1) +
+        geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+    geom_sf(
+      data = pot_ag_dealers_sdf,
+      colour = 'blue',
+      size = 0.5,
+      shape = 1,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient(
+      low = 'yellow',
+      high = 'red',
+      na.value = NA,
+      limits = c(1, 1)
+    ) +
+    
+    xlim(450000, 725000) +
+    ylim(8300000, 8650000) +
+    labs(fill = "-------------\nWithin\n1 hour of\nnon-NGO\nPotential\nAgro-\nDealers by\nVehicles\n-------------") +
+    
     theme(
       panel.grid.major.x = element_blank(),
       panel.grid.minor.x = element_blank(),
@@ -429,28 +1580,94 @@ slopem
       axis.title.y = element_blank()
     )
   
+  print(access_1hr_pot_v_plot)
+  r_pot_pop_v <- r_pot_1hr_v * r_remaining_pop_v
+  pot_pop_v <- cellStats(r_pot_pop_v, stat = 'sum')
+  cat(
+    "Total Population within 1 hour of New Agro-Dealers by Vehicles (excluding population already covered by Existing Agro-Dealers) = ",
+    pot_pop_v, "\n\n"
+  )
+  cnfa_pot_pop_v <- (cnfa_pop_v +  pot_pop_v)
+  cat(
+    "Total Population within 1 hour of both Existing and New Agro-Dealers by Vehicles = ",
+    cnfa_pot_pop_v, "\n\n"
+  )
+    cat(
+    "Target Population within 1 hour of both Existing and New Agro-Dealers by Vehicles = ",
+    target_pop, "\n\n"
+  )
+  
+  if (cnfa_pot_pop_v < target_pop) {
+    run_heuristic_v <- FALSE
+    cat(
+      "Target Population still not reached. Do not run the heuristic for potential agro-dealers"
+    )
+    
+  } else {
+    run_heuristic_v <- TRUE
+    cat("Target Population can be reached. Run the heuristic for potential agro-dealers")
+  }
+}
+
 ```
 
-#### Land use
+### Heuristic
 
-```{r landuse_raster, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Copernicus Land Cover", dev = 'png', results='hide'}
-
-
+```{r vehicle_g_add_potential, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Vehicle Accessibility - Potential Agro-Dealers", dev = 'png', results='markup'}
 
 
-
-
-
-srtm_34_14S <- getData('SRTM', lon=34, lat=-14)
-srtm_34_16S <- getData('SRTM', lon=34, lat=-16)
-srtm_utm  <- projectRaster(merge(srtm_34_14S, srtm_34_16S), mask_raster)
-srtm_c_mwi <- crop(srtm_utm, mask_raster)
-
-# use gplot from the rastervis package
-
-  gplot(srtm_c_mwi, maxpixels = 50000) + 
-    geom_tile(aes(fill = value), alpha = 1) +
-    #geom_tile() +
+if (run_heuristic_v == TRUE) {
+  # ----CREATE A TEMP DATAFRAME OF POINTS WITH ID GEOMETRY AND (EMPTY) pop1hr FIELD----
+  
+  temp_pot <- dplyr::select(pot_ag_dealers_sdf, id)
+  temp_pot$pop1hr_v <- 0
+  temp_pot_sp_v <-
+    as_Spatial(temp_pot) # convert to sp for AccCost function
+  
+  # -----create a vector to store id of maxpop points-----
+  
+  highpop_pt_v <- c()
+  
+  # ----create an empty data frame of optimum points with attributes
+  
+  highpop_df_v <-
+    data.frame(
+      'id' = integer(),
+      'pop_cap_j' = integer(),
+      'iteration' = integer(),
+      'pop_cap_tot' = integer()
+    )
+  
+  
+  # ----start loops----
+  
+  j = 0 # counter for number of iterations
+  
+  # ----PLOT START MAP AND CHARTS ----
+  # ----plot the start map----
+  
+  access_g_add_1hr_pot_v_plot <- ggplot() +
+    geom_sf(
+      data = boundary_mcr_utm,
+      fill = 'grey',
+      col = NA,
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    geom_tile(data = pop_mwi_utm_rsmp_df,
+              aes(x = x, y = y, fill = value)) +
+    geom_tile(
+      data = dplyr::filter(r_remaining_pop_v_df, !is.na(value)),
+      aes(x = x, y = y),
+      fill = "grey20",
+      alpha = 0.5
+    )   +
+    geom_tile(
+      data = dplyr::filter(lc_c_mwi_rcl_water_df, !is.na(value)),
+      aes(x = x, y = y),
+      fill = "blue",
+      alpha = 0.5
+    )   +
     geom_sf(
       data = central_mask,
       fill = NA,
@@ -458,27 +1675,2800 @@ srtm_c_mwi <- crop(srtm_utm, mask_raster)
       na.rm = TRUE,
       inherit.aes = FALSE
     ) +
-    scale_fill_gradient2(low = 'green', mid = 'brown',
-                        high = 'white', midpoint = 1500,
-                        na.value = NA) +
-    #xlim(-20, 60) +
-    #ylim(-40, 40) +
-    labs(fill = "-------------\nSRTM\nElevation\n-------------") +
+    geom_sf(
+      data = boundary_mcr_utm,
+      fill = NA,
+      colour = 'grey20',
+      size = 1.5,
+      inherit.aes = FALSE
+    ) +
+    geom_sf(
+      data = boundary_mcr_dist_utm,
+      fill = NA,
+      colour = 'grey20',
+      size = 0.75,
+      inherit.aes = FALSE
+    )    +
+    geom_sf(
+      data = cnfa_ag_dealers_sdf,
+      colour = 'dark green',
+      size = 1,
+      aes(shape = "Existing"),
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8320000 ,
+      aes(
+        label = paste0(
+          "Population within 1 Hour: ",
+          formatC((cnfa_pop_v),
+                  format = "d",
+                  big.mark = ",")
+        ),
+        hjust = 'right'
+      ),
+      size = 4,
+      colour = 'dark green'
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8340000 ,
+      aes(
+        label = paste0("Target Population: ", formatC((target_pop),
+                                                      format = "d",
+                                                      big.mark = ","
+        )),
+        hjust = 'right'
+      ),
+      size = 4,
+      colour = 'blue'
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8360000 ,
+      aes(label = paste0(j,  " New Agro-Dealers"),
+          hjust = 'right'),
+      size = 4,
+      colour = 'black'
+    ) +
+    scale_shape_manual(name = "Agro-Dealers", values = c("Existing" = 3, "New" =
+                                                           1)) +
+    #scale_colour_manual(name = "", values = c("Existing" = "dark green", "New" = "blue")) +
+    scale_fill_gradient(
+      labels = comma,
+      low = 'yellow',
+      high = 'red',
+      na.value = NA,
+      limits = c(0.5, 10000)
+    ) +
+    scale_x_continuous(expand = c(0, 0),
+                       limits = c(455000, 720000)) +
+    scale_y_continuous(expand = c(0, 0),
+                       limits = c(8305000, 8655000)) +
+    labs(fill = expression(
+      paste(
+        "-------------\nPopulation\nWithin\n1 Hour\n-------------\npersons/km" ^
+          2
+      )
+    )) +
+    theme(
+      #panel.background = element_rect(fill = 'white'),
+      #panel.grid.major.x = element_blank(),
+      #panel.grid.major.x = element_line(colour = 'grey'),
+      #panel.grid.minor.x = element_blank(),
+      panel.grid.minor.x = element_line(colour = 'grey'),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.background = element_rect(fill = 'white', color = NA),
+      panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+      panel.grid.minor = element_line(color = 'green', size = 2),
+      legend.key = element_rect(fill = 'white')
+    ) +
+    guides(fill = guide_colourbar(order = 1),
+           shape = guide_legend(order = 2))
+  
+  ## ----add a dummy point for plotting bar graph----
+  crs <- st_crs(32736)
+  dummy_point <- st_sf(
+    id = NA,
+    pop1hr_v = 0,
+    pop_cap_j = 0,
+    iteration = 0,
+    pop_cap_tot = cnfa_pop_v,
+    geometry = st_sfc(st_point(0:1)),
+    crs = crs
+  )
+  
+  ## ----plot the start bar chart----
+  
+  covered_population_plot <- ggplot(dummy_point) +
+    geom_bar(aes(
+      x = iteration,
+      y = pop_cap_tot,
+      alpha = (iteration / j)
+    ),
+    stat = 'identity',
+    fill = 'dark green') +
+    geom_point(aes(iteration, pop_cap_tot)) +
+    geom_hline(
+      yintercept = (target_pop),
+      linetype = 'dashed',
+      color = 'blue'
+    ) +
+    geom_text(
+      x = 0,
+      y =  target_pop - ((target_pop / 100) * 2.5),
+      aes(label = "Target Population",
+          hjust = 'left'),
+      size = 4,
+      colour = 'blue'
+    ) +
+    scale_alpha_continuous(guide = 'none') +
+    scale_y_continuous(expand = c(0, 0),
+                       labels = comma,
+                       limits = c(0, max(
+                         c(target_pop),
+                         max(dummy_point$pop_cap_tot)
+                       ))) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      labels = label_number(accuracy = 1),
+      limits = c(0, (j + 1))#,
+      #breaks = round(seq(0, j)),
+      #1
+    ) +
+    labs(x = "New Agro-Dealers (#)", y = "Population within 1 Hour (#)") +
+    theme(
+      #panel.grid.major.x = element_blank(),
+      #panel.grid.minor.x = element_blank(),
+      #axis.title.x = element_blank(),
+      axis.title.x = element_text(colour = 'grey20'),
+      axis.title.y = element_text(colour = 'grey20'),
+      axis.text.y = element_text(angle = 45),
+      panel.background = element_rect(fill = 'white', color = NA),
+      panel.grid.major.y = element_line(color = 'grey', linetype = 'dotted')
+    )
+  
+  # ----combine map and bar chart ----
+  
+  
+  access_covered <-
+    plot_grid(
+      access_g_add_1hr_pot_v_plot,
+      covered_population_plot,
+      align = "h",
+      axis = "bt",
+      rel_widths = c(1.3, 1)
+    )
+  
+  
+  # ----save combined plots as png ----
+  ggsave(
+    file = paste0("charts/access_g_add_1hr_pot_v_plot_", j, ".png"),
+    plot = access_covered,
+    width = 10,
+    height = 5,
+    units = "in",
+    dpi = 300
+  )
+  
+  # files uploaded to https://ezgif.com/ for animated gif
+  
+  # ----while target population not covered----
+  
+  while ((cnfa_pop_v + potential_pop_v) < target_pop) {
+    j = j + 1
+    
+    
+    # ----for every point in the temporary sp data frame----
+    
+    
+    for (i in 1:length(temp_pot_sp_v)) {
+      #print(j) # for debugging purposes
+      
+      # ----RUN COSTDISTANCE USING FRICTION GRID AND NEW TARGET POINT----
+      acc_i_v <-
+        accCost(tr_v, temp_pot_sp_v[i, ]) %>%
+        reclassify(matrix(c(-Inf, 3600, 1, 3600, Inf, 0)))
+      
+      # ----multiply hour cost grid with remaining population get sum and add value to temporary sp data frame pop1hr_v field ----
+      
+      popsum_i_v <- (acc_i_v * r_remaining_pop_v)  %>%
+        cellStats(stat = 'sum')
+      
+      temp_pot_sp_v[i, 2] <- popsum_i_v
+      
+    }
+    
+    # ----finish for loop----
+    
+    
+    # ----COMPARE total_pop AND RECORD POINT-ID----
+    
+    # the index of the point with the maximum population covered
+    highpop_index_v <- which.max(temp_pot_sp_v$pop1hr_v)
+    print(paste(
+      "Index of the point with the maximum population covered is : ",
+      which.max(temp_pot_sp_v$pop1hr_v)
+    ))
+    
+    # the id of the point with the maximum population covered using the index
+    highpop_id_v <- temp_pot_sp_v$id[[highpop_index_v]]
+    print(paste(
+      "Id of the point with the maximum population covered is : ",
+      highpop_id_v
+    ))
+    
+    # the maximum population covered using the index
+    print(paste(
+      "Maximum population covered is : ",
+      max(temp_pot_sp_v$pop1hr_v)
+    ))
+    
+    # ----save the point with the maximum population covered in vector----
+    
+    highpop_pt_v <- append(highpop_pt_v, highpop_id_v)
+    
+    
+    # ----RERUN THE COSTDISTANCE FOR THE OPTIMUM POINT , SAVE AND DISCARD----
+    
+    # using saved index
+    
+    acc_high_v <- accCost(tr_v, temp_pot_sp_v[highpop_index_v,]) %>%
+      reclassify(matrix(c(-Inf, 3600, 1, 3600, Inf, 0)))
+    
+    # ----multiply hour cost grid with remaining population get sum ----
+    
+    popsum_high_v <- (acc_high_v * r_remaining_pop_v)
+    potential_pop_i_v <- cellStats(popsum_high_v, stat = 'sum')
+    cat(
+      "Total Population within 1 hour of number",
+      j ,
+      " New Potential Agro-Dealer = ",
+      potential_pop_i_v,
+      "\n\n"
+    )
+    cat(
+      "Total Population within 1 hour of all ",
+      j ,
+      " New Potential Agro-Dealers = ",
+      (cnfa_pop_v + potential_pop_v + potential_pop_i_v),
+      "\n\n"
+    )
+    
+    # ----update population sums----
+    
+    # update covered population
+    potential_pop_v <- potential_pop_i_v + potential_pop_v
+    
+    # update remaining population rasters
+    r_remaining_pop_v <- r_remaining_pop_v - popsum_high_v
+    
+    # reclassify to show the area already covered as NA
+    r_remaining_pop_v_rcl  <-
+      reclassify(r_remaining_pop_v, matrix(c(0, NA),
+                                           ncol = 2,
+                                           byrow = TRUE))
+    
+    r_remaining_pop_v_df <-
+      gplot_data(r_remaining_pop_v_rcl)  # convert to geom_tile type of raster
+    
+    
+    # update remaining population
+    diff_pop_v <- cellStats(r_remaining_pop_v, stat = 'sum')
+    cat("Total Remaining Possible Population = ", diff_pop_v, "\n\n")
+    cat(
+      "Target Remaining Population = ",
+      (target_pop - cnfa_pop_v - potential_pop_v),
+      "\n\n"
+    )
+    
+    # ----create a data frame of optimum points with attributes and inner-join to temporary points for mapping
+    
+    highpop_df_v <-
+      rbind(
+        highpop_df_v,
+        data.frame(
+          'id' = as.integer(highpop_id_v),
+          'pop_cap_j' = as.integer(potential_pop_i_v),
+          'iteration' = as.integer(j),
+          'pop_cap_tot' = as.integer(cnfa_pop_v + potential_pop_v)
+        )
+      )
+    
+    new_pts_v <- inner_join(temp_pot, highpop_df_v, by = 'id')
+    
+    # ----remove latest optimum point from temp_pot_sp_v to reduce burden
+    
+    temp_pot_sp_v <- temp_pot_sp_v[-c(highpop_index_v), ]
+    
+    # ----PRODUCE MAP OF CAPTURED POPULATION AND BARCHART OF THIS ITERATION OF WHILE LOOP----
+    
+    # ----plot the map----
+    
+    access_g_add_1hr_pot_v_plot <- ggplot() +
+      geom_sf(
+        data = boundary_mcr_utm,
+        fill = 'grey',
+        col = NA,
+        na.rm = TRUE,
+        inherit.aes = FALSE
+      ) +
+      geom_tile(data = pop_mwi_utm_rsmp_df,
+                aes(x = x, y = y, fill = value)) +
+      geom_tile(
+        data = dplyr::filter(r_remaining_pop_v_df,!is.na(value)),
+        aes(x = x, y = y),
+        fill = "grey20",
+        alpha = 0.5
+      )   +
+      geom_tile(
+        data = dplyr::filter(lc_c_mwi_rcl_water_df,!is.na(value)),
+        aes(x = x, y = y),
+        fill = "blue",
+        alpha = 0.5
+      )   +
+      geom_sf(
+        data = central_mask,
+        fill = NA,
+        col = 'dark grey',
+        na.rm = TRUE,
+        inherit.aes = FALSE
+      ) +
+      geom_sf(
+        data = boundary_mcr_utm,
+        fill = NA,
+        colour = 'grey20',
+        size = 1.5,
+        inherit.aes = FALSE
+      ) +
+      geom_sf(
+        data = boundary_mcr_dist_utm,
+        fill = NA,
+        colour = 'grey20',
+        size = 0.75,
+        inherit.aes = FALSE
+      )    +
+      geom_sf(
+        data = cnfa_ag_dealers_sdf,
+        colour = 'dark green',
+        size = 1,
+        aes(shape = "Existing"),
+        inherit.aes = FALSE
+      ) +
+      geom_sf(
+        data = new_pts_v,
+        colour = 'dark green',
+        size = 1,
+        aes(shape = "New"),
+        inherit.aes = FALSE
+      ) +
+      geom_text(
+        x = 660000,
+        y = 8320000 ,
+        aes(
+          label = paste0(
+            "Population within 1 Hour: ",
+            formatC((potential_pop_v + cnfa_pop_v),
+                    format = "d",
+                    big.mark = ","
+            )
+          ),
+          hjust = 'right'
+        ),
+        size = 4,
+        colour = 'dark green'
+      ) +
+      geom_text(
+        x = 660000,
+        y = 8340000 ,
+        aes(
+          label = paste0("Target Population: ", formatC((target_pop),
+                                                        format = "d",
+                                                        big.mark = ","
+          )),
+          hjust = 'right'
+        ),
+        size = 4,
+        colour = 'blue'
+      ) +
+      geom_text(
+        x = 660000,
+        y = 8360000 ,
+        aes(label = paste0(j, " New Agro-Dealers"),
+            hjust = 'right'),
+        size = 4,
+        colour = 'black'
+      ) +
+      scale_shape_manual(name = "Agro-Dealers",
+                         values = c("Existing" = 3, "New" = 1)) +
+      scale_fill_gradient(
+        labels = comma,
+        low = 'yellow',
+        high = 'red',
+        na.value = NA,
+        limits = c(0.5, 10000)
+      ) +
+      scale_x_continuous(expand = c(0, 0),
+                         limits = c(455000, 720000)) +
+      scale_y_continuous(expand = c(0, 0),
+                         limits = c(8305000, 8655000)) +
+      labs(fill = expression(
+        paste(
+          "-------------\nPopulation\nWithin\n1 Hour\n-------------\npersons/km" ^
+            2
+        )
+      )) +
+      theme(
+        #panel.background = element_rect(fill = 'white'),
+        #panel.grid.major.x = element_blank(),
+        #panel.grid.major.x = element_line(colour = 'grey'),
+        #panel.grid.minor.x = element_blank(),
+        panel.grid.minor.x = element_line(colour = 'grey'),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.background = element_rect(fill = 'white', color = NA),
+        panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+        panel.grid.minor = element_line(color = 'green', size = 2),
+        legend.key = element_rect(fill = 'white')
+      ) +
+      guides(fill = guide_colourbar(order = 1),
+             shape = guide_legend(order = 2))
+    
+    ## ----add a dummy point for plotting bar graph----
+    crs <- st_crs(32736)
+    dummy_point <- st_sf(
+      id = NA,
+      pop1hr_v = 0,
+      pop_cap_j = 0,
+      iteration = 0,
+      pop_cap_tot = cnfa_pop_v,
+      geometry = st_sfc(st_point(0:1)),
+      crs = crs
+    )
+    
+    new_pts_v_dummy <- rbind(new_pts_v, dummy_point)
+    
+    ## ----plot the bar chart----
+    
+    covered_population_plot <- ggplot(new_pts_v_dummy) +
+      geom_bar(aes(
+        x = iteration,
+        y = pop_cap_tot,
+        alpha = (iteration / j)
+      ),
+      stat = 'identity',
+      fill = 'dark green',) +
+      geom_point(aes(iteration, pop_cap_tot)) +
+      geom_hline(
+        yintercept = (target_pop),
+        linetype = 'dashed',
+        color = 'blue'
+      ) +
+      geom_text(
+        x = 0,
+        y =  target_pop - ((target_pop / 100) * 2.5),
+        aes(label = "Target Population",
+            hjust = 'left'),
+        size = 4,
+        colour = 'blue'
+      ) +
+      scale_alpha_continuous(guide = 'none') +
+      scale_y_continuous(
+        expand = c(0, 0),
+        labels = comma,
+        limits = c(0, max(
+          c(target_pop),
+          max(new_pts_v_dummy$pop_cap_tot)
+        ))
+      ) +
+      scale_x_continuous(
+        expand = c(0, 0),
+        labels = label_number(accuracy = 1),
+        limits = c(0, (j + 1))#,
+        #breaks = round(seq(0, j)),
+        #1
+      ) +
+      labs(x = "New Agro-Dealers (#)", y = "Population within 1 Hour (#)") +
+      theme(
+        #panel.grid.major.x = element_blank(),
+        #panel.grid.minor.x = element_blank(),
+        #axis.title.x = element_blank(),
+        axis.title.x = element_text(colour = 'grey20'),
+        axis.title.y = element_text(colour = 'grey20'),
+        axis.text.y = element_text(angle = 45),
+        panel.background = element_rect(fill = 'white', color = NA),
+        panel.grid.major.y = element_line(color = 'grey', linetype = 'dotted')
+      )
+    
+    # ----combine map and bar chart ----
+    
+    
+    access_covered <-
+      plot_grid(
+        access_g_add_1hr_pot_v_plot,
+        covered_population_plot,
+        align = "h",
+        axis = "bt",
+        rel_widths = c(1.3, 1)
+      )
+    
+    
+    # ----save combined plots as png ----
+    ggsave(
+      file = paste0("charts/access_g_add_1hr_pot_v_plot_", j, ".png"),
+      plot = access_covered,
+      width = 10,
+      height = 5,
+      units = "in",
+      dpi = 300
+    )
+    
+    # files uploaded to https://ezgif.com/ for animated gif
+    
+  }
+  
+  cat("Completed after ", j, "iterations\n\n")
+  
+  # ----CLEAN UP----
+  # re-initialise values
+  
+  potential_pop_v <- 0
+  r_remaining_pop_v <- pop_mwi_utm_rsmp - r_cnfa_pop_v
+  
+}
+
+
+```
+
+
+## Bicycle accessibility analysis with existing agro-dealers
+
+### Total Time
+
+```{r bicycle_access_existing, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Bicycle Accessibility - Existing Agro-Dealers", dev = 'png', results='markup'}
+
+
+tr_b <- transition(friction_b,function(x) 1/mean(x), 8) # transition from bicycle friction
+tr_b <- geoCorrection(tr_b, scl = TRUE) # Geographic correction is necessary for all objects of the class Transition that are made with directions > 4.The function will correct for diagonal connections between grid cells (which cover a longer distance than vertical or horizontal connections).
+
+
+cnfa_ag_dealers_sp <- as_Spatial(cnfa_ag_dealers_sdf)
+
+cnfa_cost_b <- accCost(tr_b, cnfa_ag_dealers_sp)
+
+gplot(cnfa_cost_b, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'dark green', size = 0.5, shape = 3,
+      inherit.aes = FALSE) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(0,10000)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nTime to\nNGO\nAgro-\nDealers\nBicycles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+```
+### Within 1 hour
+
+```{r bicycle_access_existing_1hr, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Within 1 hour - Bicycle Accessibility - Existing Agro-Dealers", dev = 'png', results='markup'}
+
+r_cnfa_1hr_b <-  reclassify(cnfa_cost_b, matrix(c(-Inf, 3600, 1, 3600, Inf, 0),
+                                    ncol = 3,
+                                    byrow = TRUE))
+
+gplot(r_cnfa_1hr_b, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'dark green', size = 0.5, shape = 3,
+      inherit.aes = FALSE) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(1,1)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nWithin\n1 hour of\nNGO\nAgro-\nDealers by\nBicycles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+r_cnfa_pop_b <- r_cnfa_1hr_b * pop_mwi_utm_rsmp
+cnfa_pop_b <- cellStats(r_cnfa_pop_b, stat='sum')
+cat("Total Population within 1 hour of Existing Agro-Dealers by Bicycles = ", cnfa_pop_b,"\n\n")
+
+if (cnfa_pop_b < target_pop) {
+  run_heuristic_b <- TRUE
+  cat("Target Population not reached. Run the heuristic for potential agro-dealers")
+  
+} else {
+  run_heuristic_b <- FALSE
+  cat("Target Population reached. Do not run the heuristic for potential agro-dealers")
+}
+
+```
+
+## Bicycle greedy add heuristic with potential agro-dealers
+
+If the target population is not reached by the existing Existing agro-dealers then I need to consider the other potential agro-dealers.
+
+Before running the greedy add heuristic I need to check whether it is possible to reach 80% of the population from the other potential agro-dealer locations.
+
+
+### Remaining Population
+
+```{r bicycle_remaining_population, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Bicycle Accessibility - Remaining Population", dev = 'png', results='markup'}
+
+if ( run_heuristic_b == TRUE) {
+ 
+
+  r_covered_pop_b <- r_cnfa_pop_b
+  
+  # remove the already covered population from the population grid to give remaining value
+  r_remaining_pop_b <- pop_mwi_utm_rsmp - r_cnfa_pop_b
+  
+  # reclassify to show the area already covered as NA 
+  r_remaining_pop_b_rcl  <-
+    reclassify(r_remaining_pop_b, matrix(c(0, NA),
+                                         ncol = 2,
+                                         byrow = TRUE))
+  
+  r_remaining_pop_b_df <- gplot_data(r_remaining_pop_b_rcl)  # convert to geom_tile type of raster
+
+remaining_pop_b_plot <- gplot(r_remaining_pop_b, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(
+    data = cnfa_ag_dealers_sdf,
+    colour = 'dark green',
+    size = 0.5,
+    shape = 3,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    colour = 'blue',
+    size = 0.5,
+    shape = 1,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_gradient(
+    low = 'yellow',
+    high = 'red',
+    na.value = NA,
+    limits = c(0.5, 5000)
+  ) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nRemaining\nPopulation\nBicycles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+print(remaining_pop_b_plot)
+
+diff_pop_b <- cellStats(r_remaining_pop_b,stat='sum')
+cat("Target Population = ", formatC(target_pop, format="d", big.mark=","),"\n\n")
+cat("Total Population within 1 Hour = ", formatC(cnfa_pop_b, format="d", big.mark=","),"\n\n")
+cat("Total Uncovered Population = ", formatC(diff_pop_b, format="d", big.mark=","),"\n\n")
+cat("Remaining Population to Target = ", formatC((target_pop - cnfa_pop_b), format="d", big.mark=","),"\n\n")
+
+potential_pop_b <- 0
+
+}
+
+```
+
+```{r pop_rem_b_2_postgres, cache=TRUE, results='hide'}
+
+if ( run_heuristic_b == TRUE) {
+  
+# this writes the  remaining pop surface to postgres
+
+temp_points <- st_as_sf(rasterToPoints(r_remaining_pop_b, function(x){x>0}, spatial=TRUE))
+temp_points$Id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "remaining_pop_b_points"))
+
+}
+```
+
+### Total Time
+
+```{r bicycle_access_potential, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Bicycle Accessibility - Potential Agro-Dealers", dev = 'png', results='hide'}
+
+if ( run_heuristic_b == TRUE) {
+  
+pot_ag_dealers_sp <- as_Spatial(pot_ag_dealers_sdf)
+
+pot_cost_b <- accCost(tr_b, pot_ag_dealers_sp)
+
+access_pot_b_plot <- gplot(pot_cost_b, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+      geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    ,
+    colour = 'blue',
+    size = 0.5,
+    shape = 1,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(0,10000)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nTime to\nnon-NGO\nPotential\nAgro-\nDealers\nBicycles\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+print(access_pot_b_plot)
+
+}
+
+```
+
+### Within 1 hour
+
+```{r bicycle_access_potential_1hr, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Within 1 hour - Bicycle Accessibility - Potential Agro-Dealers", dev = 'png', results='markup'}
+
+if (run_heuristic_b == TRUE) {
+  r_pot_1hr_b <-
+    reclassify(pot_cost_b, matrix(c(-Inf, 3600, 1, 3600, Inf, 0),
+                                  ncol = 3,
+                                  byrow = TRUE))
+  
+  access_1hr_pot_b_plot <-   gplot(r_pot_1hr_b, maxpixels = 50000) +
+    geom_tile(aes(fill = value), alpha = 1) +
+        geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+    geom_sf(
+      data = pot_ag_dealers_sdf,
+      colour = 'blue',
+      size = 0.5,
+      shape = 1,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient(
+      low = 'yellow',
+      high = 'red',
+      na.value = NA,
+      limits = c(1, 1)
+    ) +
+    
+    xlim(450000, 725000) +
+    ylim(8300000, 8650000) +
+    labs(fill = "-------------\nWithin\n1 hour of\nnon-NGO\nPotential\nAgro-\nDealers by\nBicycles\n-------------") +
+    
     theme(
       panel.grid.major.x = element_blank(),
       panel.grid.minor.x = element_blank(),
       axis.title.x = element_blank(),
       axis.title.y = element_blank()
     )
+  
+  print(access_1hr_pot_b_plot)
+  r_pot_pop_b <- r_pot_1hr_b * r_remaining_pop_b
+  pot_pop_b <- cellStats(r_pot_pop_b, stat = 'sum')
+  cat(
+    "Total Population within 1 hour of New Agro-Dealers by Bicycles (excluding population already covered by Existing Agro-Dealers) = ",
+    pot_pop_b, "\n\n"
+  )
+  cnfa_pot_pop_b <- (cnfa_pop_b +  pot_pop_b)
+  cat(
+    "Total Population within 1 hour of both Existing and New Agro-Dealers by Bicycles = ",
+    cnfa_pot_pop_b, "\n\n"
+  )
+    cat(
+    "Target Population within 1 hour of both Existing and New Agro-Dealers by Bicycles = ",
+    target_pop, "\n\n"
+  )
+  
+  if (cnfa_pot_pop_b < target_pop) {
+    run_heuristic_b <- FALSE
+    cat(
+      "Target Population still not reached. Do not run the heuristic for potential agro-dealers"
+    )
+    
+  } else {
+    run_heuristic_b <- TRUE
+    cat("Target Population can be reached. Run the heuristic for potential agro-dealers")
+  }
+}
+
+```
+
+### Heuristic
+
+```{r bicycle_g_add_potential, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Bicycle Accessibility - Potential Agro-Dealers", dev = 'png', results='markup'}
+
+
+if (run_heuristic_b == TRUE) {
+  # ----CREATE A TEMP DATAFRAME OF POINTS WITH ID GEOMETRY AND (EMPTY) pop1hr FIELD----
+  
+  temp_pot <- dplyr::select(pot_ag_dealers_sdf, id)
+  temp_pot$pop1hr_b <- 0
+  temp_pot_sp_b <-
+    as_Spatial(temp_pot) # convert to sp for AccCost function
+  
+  # -----create a vector to store id of maxpop points-----
+  
+  highpop_pt_b <- c()
+  
+  # ----create an empty data frame of optimum points with attributes
+  
+  highpop_df_b <-
+    data.frame(
+      'id' = integer(),
+      'pop_cap_j' = integer(),
+      'iteration' = integer(),
+      'pop_cap_tot' = integer()
+    )
+  
+  
+  # ----start loops----
+  
+  j = 0 # counter for number of iterations
+  
+  # ----PLOT START MAP AND CHARTS ----
+  # ----plot the start map----
+  
+  access_g_add_1hr_pot_b_plot <- ggplot() +
+    geom_sf(
+      data = boundary_mcr_utm,
+      fill = 'grey',
+      col = NA,
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    geom_tile(data = pop_mwi_utm_rsmp_df,
+              aes(x = x, y = y, fill = value)) +
+    geom_tile(
+      data = dplyr::filter(r_remaining_pop_b_df, !is.na(value)),
+      aes(x = x, y = y),
+      fill = "grey20",
+      alpha = 0.5
+    )   +
+    geom_tile(
+      data = dplyr::filter(lc_c_mwi_rcl_water_df, !is.na(value)),
+      aes(x = x, y = y),
+      fill = "blue",
+      alpha = 0.5
+    )   +
+    geom_sf(
+      data = central_mask,
+      fill = NA,
+      col = 'dark grey',
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    geom_sf(
+      data = boundary_mcr_utm,
+      fill = NA,
+      colour = 'grey20',
+      size = 1.5,
+      inherit.aes = FALSE
+    ) +
+    geom_sf(
+      data = boundary_mcr_dist_utm,
+      fill = NA,
+      colour = 'grey20',
+      size = 0.75,
+      inherit.aes = FALSE
+    )    +
+    geom_sf(
+      data = cnfa_ag_dealers_sdf,
+      colour = 'dark green',
+      size = 1,
+      aes(shape = "Existing"),
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8320000 ,
+      aes(
+        label = paste0(
+          "Population within 1 Hour: ",
+          formatC((cnfa_pop_b),
+                  format = "d",
+                  big.mark = ",")
+        ),
+        hjust = 'right'
+      ),
+      size = 4,
+      colour = 'dark green'
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8340000 ,
+      aes(
+        label = paste0("Target Population: ", formatC((target_pop),
+                                                      format = "d",
+                                                      big.mark = ","
+        )),
+        hjust = 'right'
+      ),
+      size = 4,
+      colour = 'blue'
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8360000 ,
+      aes(label = paste0(j,  " New Agro-Dealers"),
+          hjust = 'right'),
+      size = 4,
+      colour = 'black'
+    ) +
+    scale_shape_manual(name = "Agro-Dealers", values = c("Existing" = 3)) +
+    #scale_colour_manual(name = "", values = c("Existing" = "dark green", "New" = "blue")) +
+    scale_fill_gradient(
+      labels = comma,
+      low = 'yellow',
+      high = 'red',
+      na.value = NA,
+      limits = c(0.5, 10000)
+    ) +
+    scale_x_continuous(expand = c(0, 0),
+                       limits = c(455000, 720000)) +
+    scale_y_continuous(expand = c(0, 0),
+                       limits = c(8305000, 8655000)) +
+    labs(fill = expression(
+      paste(
+        "-------------\nPopulation\nWithin\n1 Hour\n-------------\npersons/km" ^
+          2
+      )
+    )) +
+    theme(
+      #panel.background = element_rect(fill = 'white'),
+      #panel.grid.major.x = element_blank(),
+      #panel.grid.major.x = element_line(colour = 'grey'),
+      #panel.grid.minor.x = element_blank(),
+      panel.grid.minor.x = element_line(colour = 'grey'),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.background = element_rect(fill = 'white', color = NA),
+      panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+      panel.grid.minor = element_line(color = 'green', size = 2),
+      legend.key = element_rect(fill = 'white')
+    ) +
+    guides(fill = guide_colourbar(order = 1),
+           shape = guide_legend(order = 2))
+  
+  ## ----add a dummy point for plotting bar graph----
+  crs <- st_crs(32736)
+  dummy_point <- st_sf(
+    id = -1,
+    pop1hr_b = 0,
+    pop_cap_j = 0,
+    iteration = 0,
+    pop_cap_tot = cnfa_pop_b,
+    geometry = st_sfc(st_point(0:1)),
+    crs = crs
+  )
+  
+  ## ----plot the start bar chart----
+  
+  covered_population_plot <- ggplot(dummy_point) +
+    geom_bar(aes(
+      x = iteration,
+      y = pop_cap_tot,
+      alpha = (iteration / j)
+    ),
+    stat = 'identity',
+    fill = 'dark green') +
+    geom_point(aes(iteration, pop_cap_tot)) +
+    geom_hline(
+      yintercept = (target_pop),
+      linetype = 'dashed',
+      color = 'blue'
+    ) +
+    geom_text(
+      x = 0,
+      y =  target_pop - ((target_pop / 100) * 2.5),
+      aes(label = "Target Population",
+          hjust = 'left'),
+      size = 4,
+      colour = 'blue'
+    ) +
+    scale_alpha_continuous(guide = 'none') +
+    scale_y_continuous(expand = c(0, 0),
+                       labels = comma,
+                       limits = c(0, max(
+                         c(target_pop),
+                         max(dummy_point$pop_cap_tot)
+                       ))) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      labels = label_number(accuracy = 1),
+      limits = c(0, (j + 1))#,
+      #breaks = round(seq(0, j)),
+      #1
+    ) +
+    labs(x = "New Agro-Dealers (#)", y = "Population within 1 Hour (#)") +
+    theme(
+      #panel.grid.major.x = element_blank(),
+      #panel.grid.minor.x = element_blank(),
+      #axis.title.x = element_blank(),
+      axis.title.x = element_text(colour = 'grey20'),
+      axis.title.y = element_text(colour = 'grey20'),
+      axis.text.y = element_text(angle = 45),
+      panel.background = element_rect(fill = 'white', color = NA),
+      panel.grid.major.y = element_line(color = 'grey', linetype = 'dotted')
+    )
+  
+  # ----combine map and bar chart ----
+  
+  
+  access_covered <-
+    plot_grid(
+      access_g_add_1hr_pot_b_plot,
+      covered_population_plot,
+      align = "h",
+      axis = "bt",
+      rel_widths = c(1.3, 1)
+    )
+  
+  
+  # ----save combined plots as png ----
+  ggsave(
+    file = paste0("charts/access_g_add_1hr_pot_b_plot_", j, ".png"),
+    plot = access_covered,
+    width = 10,
+    height = 5,
+    units = "in",
+    dpi = 300
+  )
+  
+  # files uploaded to https://ezgif.com/ for animated gif
+  
+  # ----while target population not covered----
+  
+  while ((cnfa_pop_b + potential_pop_b) < target_pop) {
+    j = j + 1
+    
+    
+    # ----for every point in the temporary sp data frame----
+    
+    
+    for (i in 1:length(temp_pot_sp_b)) {
+      #print(j) # for debugging purposes
+      
+      # ----RUN COSTDISTANCE USING FRICTION GRID AND NEW TARGET POINT----
+      acc_i_b <-
+        accCost(tr_b, temp_pot_sp_b[i, ]) %>%
+        reclassify(matrix(c(-Inf, 3600, 1, 3600, Inf, 0)))
+      
+      # ----multiply hour cost grid with remaining population get sum and add value to temporary sp data frame pop1hr_b field ----
+      
+      popsum_i_b <- (acc_i_b * r_remaining_pop_b)  %>%
+        cellStats(stat = 'sum')
+      
+      temp_pot_sp_b[i, 2] <- popsum_i_b
+      
+    }
+    
+    # ----finish for loop----
+    
+    
+    # ----COMPARE total_pop AND RECORD POINT-ID----
+    
+    # the index of the point with the maximum population covered
+    highpop_index_b <- which.max(temp_pot_sp_b$pop1hr_b)
+    print(paste(
+      "Index of the point with the maximum population covered is : ",
+      which.max(temp_pot_sp_b$pop1hr_b)
+    ))
+    
+    # the id of the point with the maximum population covered using the index
+    highpop_id_b <- temp_pot_sp_b$id[[highpop_index_b]]
+    print(paste(
+      "Id of the point with the maximum population covered is : ",
+      highpop_id_b
+    ))
+    
+    # the maximum population covered using the index
+    print(paste(
+      "Maximum population covered is : ",
+      max(temp_pot_sp_b$pop1hr_b)
+    ))
+    
+    # ----save the point with the maximum population covered in vector----
+    
+    highpop_pt_b <- append(highpop_pt_b, highpop_id_b)
+    
+    
+    # ----RERUN THE COSTDISTANCE FOR THE OPTIMUM POINT , SAVE AND DISCARD----
+    
+    # using saved index
+    
+    acc_high_b <- accCost(tr_b, temp_pot_sp_b[highpop_index_b,]) %>%
+      reclassify(matrix(c(-Inf, 3600, 1, 3600, Inf, 0)))
+    
+    # ----multiply hour cost grid with remaining population get sum ----
+    
+    popsum_high_b <- (acc_high_b * r_remaining_pop_b)
+    potential_pop_i_b <- cellStats(popsum_high_b, stat = 'sum')
+    cat(
+      "Total Population within 1 hour of number",
+      j ,
+      " New Potential Agro-Dealer = ",
+      potential_pop_i_b,
+      "\n\n"
+    )
+    cat(
+      "Total Population within 1 hour of all Existing and ",
+      j ,
+      " New Potential Agro-Dealers = ",
+      (cnfa_pop_b + potential_pop_b + potential_pop_i_b),
+      "\n\n"
+    )
+    
+    # ----update population sums----
+    
+    # update covered population
+    potential_pop_b <- potential_pop_i_b + potential_pop_b
+    
+    # update remaining population rasters
+    r_remaining_pop_b <- r_remaining_pop_b - popsum_high_b
+    
+    # reclassify to show the area already covered as NA
+    r_remaining_pop_b_rcl  <-
+      reclassify(r_remaining_pop_b, matrix(c(0, NA),
+                                           ncol = 2,
+                                           byrow = TRUE))
+    
+    r_remaining_pop_b_df <-
+      gplot_data(r_remaining_pop_b_rcl)  # convert to geom_tile type of raster
+    
+    
+    # update remaining population
+    diff_pop_b <- cellStats(r_remaining_pop_b, stat = 'sum')
+    cat("Total Remaining Possible Population = ", diff_pop_b, "\n\n")
+    cat(
+      "Remaining Target Population = ",
+      (target_pop - cnfa_pop_b - potential_pop_b),
+      "\n\n"
+    )
+    
+    # ----create a data frame of the newest optimum point with attributes and inner-join to temporary points for mapping
+    
+    newest_highpop_df_b <-
+        data.frame(
+          'id' = as.integer(highpop_id_b),
+          'pop_cap_j' = as.integer(potential_pop_i_b),
+          'iteration' = as.integer(j),
+          'pop_cap_tot' = as.integer(cnfa_pop_b + potential_pop_b)
+        )
+      
+    
+    newest_pts_b <- inner_join(temp_pot, newest_highpop_df_b, by = 'id')
+    
+    # ----remove latest optimum point from temp_pot_sp_b to reduce burden
+    
+    temp_pot_sp_b <- temp_pot_sp_b[-c(highpop_index_b), ]
+    
+    # ----PRODUCE MAP OF CAPTURED POPULATION AND BARCHART OF THIS ITERATION OF WHILE LOOP----
+    
+    newest_pts_b_dummy <- rbind(dummy_point, newest_pts_b)
+    
+    
+    # for the first iteration use a slightly different code for mapping:
+    
+    if (j == 1) {
+      
+      # ----plot the map iteration 1----
+      cat("j should be 1 and is: ", j)
+      
+      access_g_add_1hr_pot_b_plot <- ggplot() +
+        geom_sf(
+          data = boundary_mcr_utm,
+          fill = 'grey',
+          col = NA,
+          na.rm = TRUE,
+          inherit.aes = FALSE
+        ) +
+        geom_tile(data = pop_mwi_utm_rsmp_df,
+                  aes(x = x, y = y, fill = value)) +
+        geom_tile(
+          data = dplyr::filter(r_remaining_pop_b_df, !is.na(value)),
+          aes(x = x, y = y),
+          fill = "grey20",
+          alpha = 0.5
+        )   +
+        geom_tile(
+          data = dplyr::filter(lc_c_mwi_rcl_water_df, !is.na(value)),
+          aes(x = x, y = y),
+          fill = "blue",
+          alpha = 0.5
+        )   +
+        geom_sf(
+          data = central_mask,
+          fill = NA,
+          col = 'dark grey',
+          na.rm = TRUE,
+          inherit.aes = FALSE
+        ) +
+        geom_sf(
+          data = boundary_mcr_utm,
+          fill = NA,
+          colour = 'grey20',
+          size = 1.5,
+          inherit.aes = FALSE
+        ) +
+        geom_sf(
+          data = boundary_mcr_dist_utm,
+          fill = NA,
+          colour = 'grey20',
+          size = 0.75,
+          inherit.aes = FALSE
+        )    +
+        geom_sf(
+          data = cnfa_ag_dealers_sdf,
+          colour = 'dark green',
+          #size = 1,
+          #aes(shape = "Existing", size = "Existing"),
+          aes(shape = "Existing", size = "Existing"),
+          inherit.aes = FALSE
+        ) +
+        #geom_sf(
+        #  data = new_pts_b[-c(j),],
+        #  colour = 'dark green',
+          #size = 1,
+          #aes(shape = "New", size = "New"),
+        #  aes(shape = "New", size = "New"),
+        #  inherit.aes = FALSE
+        #) +
+        geom_sf(
+          data = newest_pts_b,
+          colour = 'dark green',
+          fill = 'dark green',
+          #size = 3,
+          #shape = 21,
+          #aes(shape = "Newest", size = "Newest"),
+          aes(shape = "Newest", size = "Newest"),
+          inherit.aes = FALSE
+        ) +
+        #geom_sf(
+        #  data = new_pts_b,
+        #  colour = 'dark green',
+        #  size = 1,
+        #  aes(shape = "New"),
+        #  inherit.aes = FALSE
+        #) +
+        geom_text(
+          x = 660000,
+          y = 8320000 ,
+          aes(
+            label = paste0(
+              "Population within 1 Hour: ",
+              formatC((potential_pop_b + cnfa_pop_b),
+                      format = "d",
+                      big.mark = ","
+              )
+            ),
+            hjust = 'right'
+          ),
+          size = 4,
+          colour = 'dark green'
+        ) +
+        geom_text(
+          x = 660000,
+          y = 8340000 ,
+          aes(
+            label = paste0("Target Population: ", formatC((target_pop),
+                                                          format = "d",
+                                                          big.mark = ","
+            )),
+            hjust = 'right'
+          ),
+          size = 4,
+          colour = 'blue'
+        ) +
+        geom_text(
+          x = 660000,
+          y = 8360000 ,
+          aes(label = paste0(j, " New Agro-Dealers"),
+              hjust = 'right'),
+          size = 4,
+          colour = 'black'
+        ) +
+        scale_shape_manual(name = "Agro-Dealers",
+                           values = c(
+                             "Existing" = 3,
+                             "Newest" = 21
+                           )) +
+        scale_size_manual(name = "Agro-Dealers",
+                          values = c(
+                            "Existing" = 1,
+                            "Newest" = 3
+                          )) +
+        scale_fill_gradient(
+          labels = comma,
+          low = 'yellow',
+          high = 'red',
+          na.value = NA,
+          limits = c(0.5, 10000)
+        ) +
+        scale_x_continuous(expand = c(0, 0),
+                           limits = c(455000, 720000)) +
+        scale_y_continuous(expand = c(0, 0),
+                           limits = c(8305000, 8655000)) +
+        labs(fill = expression(
+          paste(
+            "-------------\nPopulation\nWithin\n1 Hour\n-------------\npersons/km" ^
+              2
+          )
+        )) +
+        theme(
+          #panel.background = element_rect(fill = 'white'),
+          #panel.grid.major.x = element_blank(),
+          #panel.grid.major.x = element_line(colour = 'grey'),
+          #panel.grid.minor.x = element_blank(),
+          panel.grid.minor.x = element_line(colour = 'grey'),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          panel.background = element_rect(fill = 'white', color = NA),
+          panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+          panel.grid.minor = element_line(color = 'green', size = 2),
+          legend.key = element_rect(fill = 'white')
+        ) +
+        guides(
+          fill = guide_colourbar(order = 1),
+          shape = guide_legend(order = 2),
+          size = guide_legend(order = 2)
+        )
+      
+          ## ----plot the bar chart in iteration 1----
+    
+    covered_population_plot <- ggplot(newest_pts_b_dummy) +
+      geom_bar(aes(
+        x = iteration,
+        y = pop_cap_tot,
+        alpha = (iteration / j)
+      ),
+      stat = 'identity',
+      fill = 'dark green',) +
+      geom_point(aes(iteration, pop_cap_tot)) +
+      geom_hline(
+        yintercept = (target_pop),
+        linetype = 'dashed',
+        color = 'blue'
+      ) +
+      geom_text(
+        x = 0,
+        y =  target_pop - ((target_pop / 100) * 2.5),
+        aes(label = "Target Population",
+            hjust = 'left'),
+        size = 4,
+        colour = 'blue'
+      ) +
+      scale_alpha_continuous(guide = 'none') +
+      scale_y_continuous(
+        expand = c(0, 0),
+        labels = comma,
+        limits = c(0, max(
+          c(target_pop),
+          max(newest_pts_b_dummy$pop_cap_tot)
+        ))
+      ) +
+      scale_x_continuous(
+        expand = c(0, 0),
+        labels = label_number(accuracy = 1),
+        limits = c(0, (j + 1))#,
+        #breaks = round(seq(0, j)),
+        #1
+      ) +
+      labs(x = "New Agro-Dealers (#)", y = "Population within 1 Hour (#)") +
+      theme(
+        #panel.grid.major.x = element_blank(),
+        #panel.grid.minor.x = element_blank(),
+        #axis.title.x = element_blank(),
+        axis.title.x = element_text(colour = 'grey20'),
+        axis.title.y = element_text(colour = 'grey20'),
+        axis.text.y = element_text(angle = 45),
+        panel.background = element_rect(fill = 'white', color = NA),
+        panel.grid.major.y = element_line(color = 'grey', linetype = 'dotted')
+      )
+      
+      
+    } else {
+      # ----plot the map iteration > 1----
+      cat("j should not be 1 and is: ", j)
+      
+      access_g_add_1hr_pot_b_plot <- ggplot() +
+        geom_sf(
+          data = boundary_mcr_utm,
+          fill = 'grey',
+          col = NA,
+          na.rm = TRUE,
+          inherit.aes = FALSE
+        ) +
+        geom_tile(data = pop_mwi_utm_rsmp_df,
+                  aes(x = x, y = y, fill = value)) +
+        geom_tile(
+          data = dplyr::filter(r_remaining_pop_b_df, !is.na(value)),
+          aes(x = x, y = y),
+          fill = "grey20",
+          alpha = 0.5
+        )   +
+        geom_tile(
+          data = dplyr::filter(lc_c_mwi_rcl_water_df, !is.na(value)),
+          aes(x = x, y = y),
+          fill = "blue",
+          alpha = 0.5
+        )   +
+        geom_sf(
+          data = central_mask,
+          fill = NA,
+          col = 'dark grey',
+          na.rm = TRUE,
+          inherit.aes = FALSE
+        ) +
+        geom_sf(
+          data = boundary_mcr_utm,
+          fill = NA,
+          colour = 'grey20',
+          size = 1.5,
+          inherit.aes = FALSE
+        ) +
+        geom_sf(
+          data = boundary_mcr_dist_utm,
+          fill = NA,
+          colour = 'grey20',
+          size = 0.75,
+          inherit.aes = FALSE
+        )    +
+        geom_sf(
+          data = cnfa_ag_dealers_sdf,
+          colour = 'dark green',
+          #size = 1,
+          #aes(shape = "Existing", size = "Existing"),
+          aes(shape = "Existing", size = "Existing"),
+          inherit.aes = FALSE
+        ) +
+        geom_sf(
+          data = new_pts_b,
+          colour = 'dark green',
+          #size = 1,
+          #aes(shape = "New", size = "New"),
+          aes(shape = "New", size = "New"),
+          inherit.aes = FALSE
+        ) +
+        geom_sf(
+          data = newest_pts_b,
+          colour = 'dark green',
+          fill = 'dark green',
+          #size = 3,
+          #shape = 21,
+          #aes(shape = "Newest", size = "Newest"),
+          aes(shape = "Newest", size = "Newest"),
+          inherit.aes = FALSE
+        ) +
+        #geom_sf(
+        #  data = new_pts_b,
+        #  colour = 'dark green',
+        #  size = 1,
+        #  aes(shape = "New"),
+        #  inherit.aes = FALSE
+        #) +
+        geom_text(
+          x = 660000,
+          y = 8320000 ,
+          aes(
+            label = paste0(
+              "Population within 1 Hour: ",
+              formatC((potential_pop_b + cnfa_pop_b),
+                      format = "d",
+                      big.mark = ","
+              )
+            ),
+            hjust = 'right'
+          ),
+          size = 4,
+          colour = 'dark green'
+        ) +
+        geom_text(
+          x = 660000,
+          y = 8340000 ,
+          aes(
+            label = paste0("Target Population: ", formatC((target_pop),
+                                                          format = "d",
+                                                          big.mark = ","
+            )),
+            hjust = 'right'
+          ),
+          size = 4,
+          colour = 'blue'
+        ) +
+        geom_text(
+          x = 660000,
+          y = 8360000 ,
+          aes(label = paste0(j, " New Agro-Dealers"),
+              hjust = 'right'),
+          size = 4,
+          colour = 'black'
+        ) +
+        scale_shape_manual(name = "Agro-Dealers",
+                           values = c(
+                             "Existing" = 3,
+                             "New" = 1,
+                             "Newest" = 21
+                           )) +
+        scale_size_manual(name = "Agro-Dealers",
+                          values = c(
+                            "Existing" = 1,
+                            "New" = 1,
+                            "Newest" = 3
+                          )) +
+        scale_fill_gradient(
+          labels = comma,
+          low = 'yellow',
+          high = 'red',
+          na.value = NA,
+          limits = c(0.5, 10000)
+        ) +
+        scale_x_continuous(expand = c(0, 0),
+                           limits = c(455000, 720000)) +
+        scale_y_continuous(expand = c(0, 0),
+                           limits = c(8305000, 8655000)) +
+        labs(fill = expression(
+          paste(
+            "-------------\nPopulation\nWithin\n1 Hour\n-------------\npersons/km" ^
+              2
+          )
+        )) +
+        theme(
+          #panel.background = element_rect(fill = 'white'),
+          #panel.grid.major.x = element_blank(),
+          #panel.grid.major.x = element_line(colour = 'grey'),
+          #panel.grid.minor.x = element_blank(),
+          panel.grid.minor.x = element_line(colour = 'grey'),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          panel.background = element_rect(fill = 'white', color = NA),
+          panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+          panel.grid.minor = element_line(color = 'green', size = 2),
+          legend.key = element_rect(fill = 'white')
+        ) +
+        guides(
+          fill = guide_colourbar(order = 1),
+          shape = guide_legend(order = 2),
+          size = guide_legend(order = 2)
+        )
+      
+               ## ----plot the bar chart in iteration > 1----
+    
+    covered_population_plot <- ggplot(new_pts_b_dummy) +
+      geom_bar(aes(
+        x = iteration,
+        y = pop_cap_tot,
+        alpha = (iteration / j)
+      ),
+      stat = 'identity',
+      fill = 'dark green',) +
+      geom_point(aes(iteration, pop_cap_tot)) +
+      geom_hline(
+        yintercept = (target_pop),
+        linetype = 'dashed',
+        color = 'blue'
+      ) +
+      geom_text(
+        x = 0,
+        y =  target_pop - ((target_pop / 100) * 2.5),
+        aes(label = "Target Population",
+            hjust = 'left'),
+        size = 4,
+        colour = 'blue'
+      ) +
+      scale_alpha_continuous(guide = 'none') +
+      scale_y_continuous(
+        expand = c(0, 0),
+        labels = comma,
+        limits = c(0, max(
+          c(target_pop),
+          max(new_pts_b_dummy$pop_cap_tot)
+        ))
+      ) +
+      scale_x_continuous(
+        expand = c(0, 0),
+        labels = label_number(accuracy = 1),
+        limits = c(0, (j + 1))#,
+        #breaks = round(seq(0, j)),
+        #1
+      ) +
+      labs(x = "New Agro-Dealers (#)", y = "Population within 1 Hour (#)") +
+      theme(
+        #panel.grid.major.x = element_blank(),
+        #panel.grid.minor.x = element_blank(),
+        #axis.title.x = element_blank(),
+        axis.title.x = element_text(colour = 'grey20'),
+        axis.title.y = element_text(colour = 'grey20'),
+        axis.text.y = element_text(angle = 45),
+        panel.background = element_rect(fill = 'white', color = NA),
+        panel.grid.major.y = element_line(color = 'grey', linetype = 'dotted')
+      )
+      
+      }
+    
+
+    
+    # ----combine map and bar chart ----
+    
+    
+    access_covered <-
+      plot_grid(
+        access_g_add_1hr_pot_b_plot,
+        covered_population_plot,
+        align = "h",
+        axis = "bt",
+        rel_widths = c(1.3, 1)
+      )
+    
+    
+    # ----save combined plots as png ----
+    ggsave(
+      file = paste0("charts/access_g_add_1hr_pot_b_plot_", j, ".png"),
+      plot = access_covered,
+      width = 10,
+      height = 5,
+      units = "in",
+      dpi = 300
+    )
+    
+    # files uploaded to https://ezgif.com/ for animated gif
+    
+    
+        # ----create a data frame of optimum points with attributes and inner-join to temporary points for mapping in the next iteration
+    
+    highpop_df_b <-
+      rbind(
+        highpop_df_b,
+        data.frame(
+          'id' = as.integer(highpop_id_b),
+          'pop_cap_j' = as.integer(potential_pop_i_b),
+          'iteration' = as.integer(j),
+          'pop_cap_tot' = as.integer(cnfa_pop_b + potential_pop_b)
+        )
+      )
+    
+    new_pts_b <- inner_join(temp_pot, highpop_df_b, by = 'id')
+    new_pts_b_dummy <- rbind(dummy_point, new_pts_b)
+    
+  }
+  
+  cat("Completed after ", j, "iterations\n\n")
+  
+  # ----CLEAN UP----
+  # re-initialise values
+  
+  potential_pop_b <- 0
+  r_remaining_pop_b <- pop_mwi_utm_rsmp - r_cnfa_pop_b
+  
+}
+
 
 ```
 
 
+## Walking accessibility analysis with existing agro-dealers
 
-#### Roads
+### Total Time
+
+```{r walking_access_existing, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Walking Accessibility - Existing Agro-Dealers", dev = 'png', results='markup'}
 
 
+tr_w <- transition(friction_w,function(x) 1/mean(x), 8) # transition from walking friction
+tr_w <- geoCorrection(tr_w, scl = TRUE) # Geographic correction is necessary for all objects of the class Transition that are made with directions > 4.The function will correct for diagonal connections between grid cells (which cover a longer distance than vertical or horizontal connections).
 
+
+cnfa_ag_dealers_sp <- as_Spatial(cnfa_ag_dealers_sdf)
+
+cnfa_cost_w <- accCost(tr_w, cnfa_ag_dealers_sp)
+
+gplot(cnfa_cost_w, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'dark green', size = 0.5, shape = 3,
+      inherit.aes = FALSE) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(0,10000)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nTime to\nNGO\nAgro-\nDealers\nWalking\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+```
+### Within 1 hour
+
+```{r walking_access_existing_1hr, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Within 1 hour - Walking Accessibility - Existing Agro-Dealers", dev = 'png', results='markup'}
+
+r_cnfa_1hr_w <-  reclassify(cnfa_cost_w, matrix(c(-Inf, 3600, 1, 3600, Inf, 0),
+                                    ncol = 3,
+                                    byrow = TRUE))
+
+gplot(r_cnfa_1hr_w, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(data = cnfa_ag_dealers_sdf, colour = 'dark green', size = 0.5, shape = 3,
+      inherit.aes = FALSE) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(1,1)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nWithin\n1 hour of\nNGO\nAgro-\nDealers by\nWalking\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+r_cnfa_pop_w <- r_cnfa_1hr_w * pop_mwi_utm_rsmp
+cnfa_pop_w <- cellStats(r_cnfa_pop_w, stat='sum')
+cat("Total Population within 1 hour of Existing Agro-Dealers by Walking = ", cnfa_pop_w,"\n\n")
+
+if (cnfa_pop_w < target_pop) {
+  run_heuristic_w <- TRUE
+  cat("Target Population not reached. Run the heuristic for potential agro-dealers")
+  
+} else {
+  run_heuristic_w <- FALSE
+  cat("Target Population reached. Do not run the heuristic for potential agro-dealers")
+}
+
+```
+
+## Walking greedy add heuristic with potential agro-dealers
+
+If the target population is not reached by the existing Existing agro-dealers then I need to consider the other potential agro-dealers.
+
+Before running the greedy add heuristic I need to check whether it is possible to reach 80% of the population from the other potential agro-dealer locations.
+
+
+### Remaining Population
+
+```{r walking_remaining_population, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Walking Accessibility - Remaining Population", dev = 'png', results='markup'}
+
+if ( run_heuristic_w == TRUE) {
+ 
+
+  r_covered_pop_w <- r_cnfa_pop_w
+  
+  # remove the already covered population from the population grid to give remaining value
+  r_remaining_pop_w <- pop_mwi_utm_rsmp - r_cnfa_pop_w
+  
+  # reclassify to show the area already covered as NA 
+  r_remaining_pop_w_rcl  <-
+    reclassify(r_remaining_pop_w, matrix(c(0, NA),
+                                         ncol = 2,
+                                         byrow = TRUE))
+  
+  r_remaining_pop_w_df <- gplot_data(r_remaining_pop_w_rcl)  # convert to geom_tile type of raster
+
+remaining_pop_w_plot <- gplot(r_remaining_pop_w, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+    geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(
+    data = cnfa_ag_dealers_sdf,
+    colour = 'dark green',
+    size = 0.5,
+    shape = 3,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    colour = 'blue',
+    size = 0.5,
+    shape = 1,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_gradient(
+    low = 'yellow',
+    high = 'red',
+    na.value = NA,
+    limits = c(0.5, 5000)
+  ) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nRemaining\nPopulation\nWalking\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+print(remaining_pop_w_plot)
+
+diff_pop_w <- cellStats(r_remaining_pop_w,stat='sum')
+cat("Target Population = ", formatC(target_pop, format="d", big.mark=","),"\n\n")
+cat("Total Population within 1 Hour = ", formatC(cnfa_pop_w, format="d", big.mark=","),"\n\n")
+cat("Total Uncovered Population = ", formatC(diff_pop_w, format="d", big.mark=","),"\n\n")
+cat("Remaining Population to Target = ", formatC((target_pop - cnfa_pop_w), format="d", big.mark=","),"\n\n")
+
+potential_pop_w <- 0
+
+}
+
+```
+
+```{r pop_rem_w_2_postgres, cache=TRUE, results='hide'}
+
+if ( run_heuristic_w == TRUE) {
+  
+# this writes the  remaining pop surface to postgres
+
+temp_points <- st_as_sf(rasterToPoints(r_remaining_pop_w, function(x){x>0}, spatial=TRUE))
+temp_points$Id <- seq.int(nrow(temp_points))
+
+st_write(obj = temp_points, dsn = con, Id(schema="coverage", table = "remaining_pop_w_points"))
+
+}
+```
+
+### Total Time
+
+```{r walking_access_potential, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Walking Accessibility - Potential Agro-Dealers", dev = 'png', results='hide'}
+
+if ( run_heuristic_w == TRUE) {
+  
+pot_ag_dealers_sp <- as_Spatial(pot_ag_dealers_sdf)
+
+pot_cost_w <- accCost(tr_w, pot_ag_dealers_sp)
+
+access_pot_w_plot <- gplot(pot_cost_w, maxpixels = 50000) +
+  geom_tile(aes(fill = value), alpha = 1) +
+      geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    ,
+    colour = 'blue',
+    size = 0.5,
+    shape = 1,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_gradient(low = 'yellow',
+                        high = 'red', 
+                        na.value = NA, limits = c(0,10000)) +
+  
+  xlim(450000, 725000) +
+  ylim(8300000, 8650000) +
+  labs(fill = "-------------\nTime to\nnon-NGO\nPotential\nAgro-\nDealers\nWalking\n-------------") +
+  
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+print(access_pot_w_plot)
+
+}
+
+```
+
+### Within 1 hour
+
+```{r walking_access_potential_1hr, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Within 1 hour - Walking Accessibility - Potential Agro-Dealers", dev = 'png', results='markup'}
+
+if (run_heuristic_w == TRUE) {
+  r_pot_1hr_w <-
+    reclassify(pot_cost_w, matrix(c(-Inf, 3600, 1, 3600, Inf, 0),
+                                  ncol = 3,
+                                  byrow = TRUE))
+  
+  access_1hr_pot_w_plot <-   gplot(r_pot_1hr_w, maxpixels = 50000) +
+    geom_tile(aes(fill = value), alpha = 1) +
+        geom_sf(
+    data = central_mask,
+    fill = NA,
+    col = 'dark grey',
+    na.rm = TRUE,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_utm,
+    fill = NA,
+    colour = 'grey',
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1,
+    inherit.aes = FALSE
+  )    +
+    geom_sf(
+      data = pot_ag_dealers_sdf,
+      colour = 'blue',
+      size = 0.5,
+      shape = 1,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_gradient(
+      low = 'yellow',
+      high = 'red',
+      na.value = NA,
+      limits = c(1, 1)
+    ) +
+    
+    xlim(450000, 725000) +
+    ylim(8300000, 8650000) +
+    labs(fill = "-------------\nWithin\n1 hour of\nnon-NGO\nPotential\nAgro-\nDealers by\nWalking\n-------------") +
+    
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank()
+    )
+  
+  print(access_1hr_pot_w_plot)
+  r_pot_pop_w <- r_pot_1hr_w * r_remaining_pop_w
+  pot_pop_w <- cellStats(r_pot_pop_w, stat = 'sum')
+  cat(
+    "Total Population within 1 hour of New Agro-Dealers by Walking (excluding population already covered by Existing Agro-Dealers) = ",
+    pot_pop_w, "\n\n"
+  )
+  cnfa_pot_pop_w <- (cnfa_pop_w +  pot_pop_w)
+  cat(
+    "Total Population within 1 hour of both Existing and New Agro-Dealers by Walking = ",
+    cnfa_pot_pop_w, "\n\n"
+  )
+    cat(
+    "Target Population within 1 hour of both Existing and New Agro-Dealers by Walking = ",
+    target_pop, "\n\n"
+  )
+  
+  if (cnfa_pot_pop_w < target_pop) {
+    run_heuristic_w <- FALSE
+    cat(
+      "Target Population still not reached. Do not run the heuristic for potential agro-dealers"
+    )
+    
+  } else {
+    run_heuristic_w <- TRUE
+    cat("Target Population can be reached. Run the heuristic for potential agro-dealers")
+  }
+}
+
+```
+
+### Heuristic
+
+```{r walking_g_add_potential, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Walking Accessibility - Potential Agro-Dealers", dev = 'png', results='markup'}
+
+
+if (run_heuristic_w == TRUE) {
+  # ----CREATE A TEMP DATAFRAME OF POINTS WITH ID GEOMETRY AND (EMPTY) pop1hr FIELD----
+  
+  temp_pot <- dplyr::select(pot_ag_dealers_sdf, id)
+  temp_pot$pop1hr_w <- 0
+  temp_pot_sp_w <-
+    as_Spatial(temp_pot) # convert to sp for AccCost function
+  
+  # -----create a vector to store id of maxpop points-----
+  
+  highpop_pt_w <- c()
+  
+  # ----create an empty data frame of optimum points with attributes
+  
+  highpop_df_w <-
+    data.frame(
+      'id' = integer(),
+      'pop_cap_j' = integer(),
+      'iteration' = integer(),
+      'pop_cap_tot' = integer()
+    )
+  
+  
+  # ----start loops----
+  
+  j = 0 # counter for number of iterations
+  
+  # ----PLOT START MAP AND CHARTS ----
+  # ----plot the start map----
+  
+  access_g_add_1hr_pot_w_plot <- ggplot() +
+    geom_sf(
+      data = boundary_mcr_utm,
+      fill = 'grey',
+      col = NA,
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    geom_tile(data = pop_mwi_utm_rsmp_df,
+              aes(x = x, y = y, fill = value)) +
+    geom_tile(
+      data = dplyr::filter(r_remaining_pop_w_df, !is.na(value)),
+      aes(x = x, y = y),
+      fill = "grey20",
+      alpha = 0.5
+    )   +
+    geom_tile(
+      data = dplyr::filter(lc_c_mwi_rcl_water_df, !is.na(value)),
+      aes(x = x, y = y),
+      fill = "blue",
+      alpha = 0.5
+    )   +
+    geom_sf(
+      data = central_mask,
+      fill = NA,
+      col = 'dark grey',
+      na.rm = TRUE,
+      inherit.aes = FALSE
+    ) +
+    geom_sf(
+      data = boundary_mcr_utm,
+      fill = NA,
+      colour = 'grey20',
+      size = 1.5,
+      inherit.aes = FALSE
+    ) +
+    geom_sf(
+      data = boundary_mcr_dist_utm,
+      fill = NA,
+      colour = 'grey20',
+      size = 0.75,
+      inherit.aes = FALSE
+    )    +
+    geom_sf(
+      data = cnfa_ag_dealers_sdf,
+      colour = 'dark green',
+      size = 1,
+      aes(shape = "Existing"),
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8320000 ,
+      aes(
+        label = paste0(
+          "Population within 1 Hour: ",
+          formatC((cnfa_pop_w),
+                  format = "d",
+                  big.mark = ",")
+        ),
+        hjust = 'right'
+      ),
+      size = 4,
+      colour = 'dark green'
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8340000 ,
+      aes(
+        label = paste0("Target Population: ", formatC((target_pop),
+                                                      format = "d",
+                                                      big.mark = ","
+        )),
+        hjust = 'right'
+      ),
+      size = 4,
+      colour = 'blue'
+    ) +
+    geom_text(
+      x = 660000,
+      y = 8360000 ,
+      aes(label = paste0(j,  " New Agro-Dealers"),
+          hjust = 'right'),
+      size = 4,
+      colour = 'black'
+    ) +
+    scale_shape_manual(name = "Agro-Dealers", values = c("Existing" = 3, "New" =
+                                                           1)) +
+    #scale_colour_manual(name = "", values = c("Existing" = "dark green", "New" = "blue")) +
+    scale_fill_gradient(
+      labels = comma,
+      low = 'yellow',
+      high = 'red',
+      na.value = NA,
+      limits = c(0.5, 10000)
+    ) +
+    scale_x_continuous(expand = c(0, 0),
+                       limits = c(455000, 720000)) +
+    scale_y_continuous(expand = c(0, 0),
+                       limits = c(8305000, 8655000)) +
+    labs(fill = expression(
+      paste(
+        "-------------\nPopulation\nWithin\n1 Hour\n-------------\npersons/km" ^
+          2
+      )
+    )) +
+    theme(
+      #panel.background = element_rect(fill = 'white'),
+      #panel.grid.major.x = element_blank(),
+      #panel.grid.major.x = element_line(colour = 'grey'),
+      #panel.grid.minor.x = element_blank(),
+      panel.grid.minor.x = element_line(colour = 'grey'),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.background = element_rect(fill = 'white', color = NA),
+      panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+      panel.grid.minor = element_line(color = 'green', size = 2),
+      legend.key = element_rect(fill = 'white')
+    ) +
+    guides(fill = guide_colourbar(order = 1),
+           shape = guide_legend(order = 2))
+  
+  ## ----add a dummy point for plotting bar graph----
+  crs <- st_crs(32736)
+  dummy_point <- st_sf(
+    id = NA,
+    pop1hr_w = 0,
+    pop_cap_j = 0,
+    iteration = 0,
+    pop_cap_tot = cnfa_pop_w,
+    geometry = st_sfc(st_point(0:1)),
+    crs = crs
+  )
+  
+  ## ----plot the start bar chart----
+  
+  covered_population_plot <- ggplot(dummy_point) +
+    geom_bar(aes(
+      x = iteration,
+      y = pop_cap_tot,
+      alpha = (iteration / j)
+    ),
+    stat = 'identity',
+    fill = 'dark green') +
+    geom_point(aes(iteration, pop_cap_tot)) +
+    geom_hline(
+      yintercept = (target_pop),
+      linetype = 'dashed',
+      color = 'blue'
+    ) +
+    geom_text(
+      x = 0,
+      y =  target_pop - ((target_pop / 100) * 2.5),
+      aes(label = "Target Population",
+          hjust = 'left'),
+      size = 4,
+      colour = 'blue'
+    ) +
+    scale_alpha_continuous(guide = 'none') +
+    scale_y_continuous(expand = c(0, 0),
+                       labels = comma,
+                       limits = c(0, max(
+                         c(target_pop),
+                         max(dummy_point$pop_cap_tot)
+                       ))) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      labels = label_number(accuracy = 1),
+      limits = c(0, (j + 1))#,
+      #breaks = round(seq(0, j)),
+      #1
+    ) +
+    labs(x = "New Agro-Dealers (#)", y = "Population within 1 Hour (#)") +
+    theme(
+      #panel.grid.major.x = element_blank(),
+      #panel.grid.minor.x = element_blank(),
+      #axis.title.x = element_blank(),
+      axis.title.x = element_text(colour = 'grey20'),
+      axis.title.y = element_text(colour = 'grey20'),
+      axis.text.y = element_text(angle = 45),
+      panel.background = element_rect(fill = 'white', color = NA),
+      panel.grid.major.y = element_line(color = 'grey', linetype = 'dotted')
+    )
+  
+  # ----combine map and bar chart ----
+  
+  
+  access_covered <-
+    plot_grid(
+      access_g_add_1hr_pot_w_plot,
+      covered_population_plot,
+      align = "h",
+      axis = "bt",
+      rel_widths = c(1.3, 1)
+    )
+  
+  
+  # ----save combined plots as png ----
+  ggsave(
+    file = paste0("charts/access_g_add_1hr_pot_w_plot_", j, ".png"),
+    plot = access_covered,
+    width = 10,
+    height = 5,
+    units = "in",
+    dpi = 300
+  )
+  
+  # files uploaded to https://ezgif.com/ for animated gif
+  
+  # ----while target population not covered----
+  
+  while ((cnfa_pop_w + potential_pop_w) < target_pop) {
+    j = j + 1
+    
+    
+    # ----for every point in the temporary sp data frame----
+    
+    
+    for (i in 1:length(temp_pot_sp_w)) {
+      #print(j) # for debugging purposes
+      
+      # ----RUN COSTDISTANCE USING FRICTION GRID AND NEW TARGET POINT----
+      acc_i_w <-
+        accCost(tr_w, temp_pot_sp_w[i, ]) %>%
+        reclassify(matrix(c(-Inf, 3600, 1, 3600, Inf, 0)))
+      
+      # ----multiply hour cost grid with remaining population get sum and add value to temporary sp data frame pop1hr_w field ----
+      
+      popsum_i_w <- (acc_i_w * r_remaining_pop_w)  %>%
+        cellStats(stat = 'sum')
+      
+      temp_pot_sp_w[i, 2] <- popsum_i_w
+      
+    }
+    
+    # ----finish for loop----
+    
+    
+    # ----COMPARE total_pop AND RECORD POINT-ID----
+    
+    # the index of the point with the maximum population covered
+    highpop_index_w <- which.max(temp_pot_sp_w$pop1hr_w)
+    print(paste(
+      "Index of the point with the maximum population covered is : ",
+      which.max(temp_pot_sp_w$pop1hr_w)
+    ))
+    
+    # the id of the point with the maximum population covered using the index
+    highpop_id_w <- temp_pot_sp_w$id[[highpop_index_w]]
+    print(paste(
+      "Id of the point with the maximum population covered is : ",
+      highpop_id_w
+    ))
+    
+    # the maximum population covered using the index
+    print(paste(
+      "Maximum population covered is : ",
+      max(temp_pot_sp_w$pop1hr_w)
+    ))
+    
+    # ----save the point with the maximum population covered in vector----
+    
+    highpop_pt_w <- append(highpop_pt_w, highpop_id_w)
+    
+    
+    # ----RERUN THE COSTDISTANCE FOR THE OPTIMUM POINT , SAVE AND DISCARD----
+    
+    # using saved index
+    
+    acc_high_w <- accCost(tr_w, temp_pot_sp_w[highpop_index_w,]) %>%
+      reclassify(matrix(c(-Inf, 3600, 1, 3600, Inf, 0)))
+    
+    # ----multiply hour cost grid with remaining population get sum ----
+    
+    popsum_high_w <- (acc_high_w * r_remaining_pop_w)
+    potential_pop_i_w <- cellStats(popsum_high_w, stat = 'sum')
+    cat(
+      "Total Population within 1 hour of number",
+      j ,
+      " New Potential Agro-Dealer = ",
+      potential_pop_i_w,
+      "\n\n"
+    )
+    cat(
+      "Total Population within 1 hour of all ",
+      j ,
+      " New Potential Agro-Dealers = ",
+      (cnfa_pop_w + potential_pop_w + potential_pop_i_w),
+      "\n\n"
+    )
+    
+    # ----update population sums----
+    
+    # update covered population
+    potential_pop_w <- potential_pop_i_w + potential_pop_w
+    
+    # update remaining population rasters
+    r_remaining_pop_w <- r_remaining_pop_w - popsum_high_w
+    
+    # reclassify to show the area already covered as NA
+    r_remaining_pop_w_rcl  <-
+      reclassify(r_remaining_pop_w, matrix(c(0, NA),
+                                           ncol = 2,
+                                           byrow = TRUE))
+    
+    r_remaining_pop_w_df <-
+      gplot_data(r_remaining_pop_w_rcl)  # convert to geom_tile type of raster
+    
+    
+    # update remaining population
+    diff_pop_w <- cellStats(r_remaining_pop_w, stat = 'sum')
+    cat("Total Remaining Possible Population = ", diff_pop_w, "\n\n")
+    cat(
+      "Target Remaining Population = ",
+      (target_pop - cnfa_pop_w - potential_pop_w),
+      "\n\n"
+    )
+    
+    # ----create a data frame of optimum points with attributes and inner-join to temporary points for mapping
+    
+    highpop_df_w <-
+      rbind(
+        highpop_df_w,
+        data.frame(
+          'id' = as.integer(highpop_id_w),
+          'pop_cap_j' = as.integer(potential_pop_i_w),
+          'iteration' = as.integer(j),
+          'pop_cap_tot' = as.integer(cnfa_pop_w + potential_pop_w)
+        )
+      )
+    
+    new_pts_w <- inner_join(temp_pot, highpop_df_w, by = 'id')
+    
+    # ----remove latest optimum point from temp_pot_sp_w to reduce burden
+    
+    temp_pot_sp_w <- temp_pot_sp_w[-c(highpop_index_w), ]
+    
+    # ----PRODUCE MAP OF CAPTURED POPULATION AND BARCHART OF THIS ITERATION OF WHILE LOOP----
+    
+    # ----plot the map----
+    
+    access_g_add_1hr_pot_w_plot <- ggplot() +
+      geom_sf(
+        data = boundary_mcr_utm,
+        fill = 'grey',
+        col = NA,
+        na.rm = TRUE,
+        inherit.aes = FALSE
+      ) +
+      geom_tile(data = pop_mwi_utm_rsmp_df,
+                aes(x = x, y = y, fill = value)) +
+      geom_tile(
+        data = dplyr::filter(r_remaining_pop_w_df,!is.na(value)),
+        aes(x = x, y = y),
+        fill = "grey20",
+        alpha = 0.5
+      )   +
+      geom_tile(
+        data = dplyr::filter(lc_c_mwi_rcl_water_df,!is.na(value)),
+        aes(x = x, y = y),
+        fill = "blue",
+        alpha = 0.5
+      )   +
+      geom_sf(
+        data = central_mask,
+        fill = NA,
+        col = 'dark grey',
+        na.rm = TRUE,
+        inherit.aes = FALSE
+      ) +
+      geom_sf(
+        data = boundary_mcr_utm,
+        fill = NA,
+        colour = 'grey20',
+        size = 1.5,
+        inherit.aes = FALSE
+      ) +
+      geom_sf(
+        data = boundary_mcr_dist_utm,
+        fill = NA,
+        colour = 'grey20',
+        size = 0.75,
+        inherit.aes = FALSE
+      )    +
+      geom_sf(
+        data = cnfa_ag_dealers_sdf,
+        colour = 'dark green',
+        size = 1,
+        aes(shape = "Existing"),
+        inherit.aes = FALSE
+      ) +
+      geom_sf(
+        data = new_pts_w,
+        colour = 'dark green',
+        size = 1,
+        aes(shape = "New"),
+        inherit.aes = FALSE
+      ) +
+      geom_text(
+        x = 660000,
+        y = 8320000 ,
+        aes(
+          label = paste0(
+            "Population within 1 Hour: ",
+            formatC((potential_pop_w + cnfa_pop_w),
+                    format = "d",
+                    big.mark = ","
+            )
+          ),
+          hjust = 'right'
+        ),
+        size = 4,
+        colour = 'dark green'
+      ) +
+      geom_text(
+        x = 660000,
+        y = 8340000 ,
+        aes(
+          label = paste0("Target Population: ", formatC((target_pop),
+                                                        format = "d",
+                                                        big.mark = ","
+          )),
+          hjust = 'right'
+        ),
+        size = 4,
+        colour = 'blue'
+      ) +
+      geom_text(
+        x = 660000,
+        y = 8360000 ,
+        aes(label = paste0(j, " New Agro-Dealers"),
+            hjust = 'right'),
+        size = 4,
+        colour = 'black'
+      ) +
+      scale_shape_manual(name = "Agro-Dealers",
+                         values = c("Existing" = 3, "New" = 1)) +
+      scale_fill_gradient(
+        labels = comma,
+        low = 'yellow',
+        high = 'red',
+        na.value = NA,
+        limits = c(0.5, 10000)
+      ) +
+      scale_x_continuous(expand = c(0, 0),
+                         limits = c(455000, 720000)) +
+      scale_y_continuous(expand = c(0, 0),
+                         limits = c(8305000, 8655000)) +
+      labs(fill = expression(
+        paste(
+          "-------------\nPopulation\nWithin\n1 Hour\n-------------\npersons/km" ^
+            2
+        )
+      )) +
+      theme(
+        #panel.background = element_rect(fill = 'white'),
+        #panel.grid.major.x = element_blank(),
+        #panel.grid.major.x = element_line(colour = 'grey'),
+        #panel.grid.minor.x = element_blank(),
+        panel.grid.minor.x = element_line(colour = 'grey'),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.background = element_rect(fill = 'white', color = NA),
+        panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+        panel.grid.minor = element_line(color = 'green', size = 2),
+        legend.key = element_rect(fill = 'white')
+      ) +
+      guides(fill = guide_colourbar(order = 1),
+             shape = guide_legend(order = 2))
+    
+    ## ----add a dummy point for plotting bar graph----
+    crs <- st_crs(32736)
+    dummy_point <- st_sf(
+      id = NA,
+      pop1hr_w = 0,
+      pop_cap_j = 0,
+      iteration = 0,
+      pop_cap_tot = cnfa_pop_w,
+      geometry = st_sfc(st_point(0:1)),
+      crs = crs
+    )
+    
+    new_pts_w_dummy <- rbind(new_pts_w, dummy_point)
+    
+    ## ----plot the bar chart----
+    
+    covered_population_plot <- ggplot(new_pts_w_dummy) +
+      geom_bar(aes(
+        x = iteration,
+        y = pop_cap_tot,
+        alpha = (iteration / j)
+      ),
+      stat = 'identity',
+      fill = 'dark green',) +
+      geom_point(aes(iteration, pop_cap_tot)) +
+      geom_hline(
+        yintercept = (target_pop),
+        linetype = 'dashed',
+        color = 'blue'
+      ) +
+      geom_text(
+        x = 0,
+        y =  target_pop - ((target_pop / 100) * 2.5),
+        aes(label = "Target Population",
+            hjust = 'left'),
+        size = 4,
+        colour = 'blue'
+      ) +
+      scale_alpha_continuous(guide = 'none') +
+      scale_y_continuous(
+        expand = c(0, 0),
+        labels = comma,
+        limits = c(0, max(
+          c(target_pop),
+          max(new_pts_w_dummy$pop_cap_tot)
+        ))
+      ) +
+      scale_x_continuous(
+        expand = c(0, 0),
+        labels = label_number(accuracy = 1),
+        limits = c(0, (j + 1))#,
+        #breaks = round(seq(0, j)),
+        #1
+      ) +
+      labs(x = "New Agro-Dealers (#)", y = "Population within 1 Hour (#)") +
+      theme(
+        #panel.grid.major.x = element_blank(),
+        #panel.grid.minor.x = element_blank(),
+        #axis.title.x = element_blank(),
+        axis.title.x = element_text(colour = 'grey20'),
+        axis.title.y = element_text(colour = 'grey20'),
+        axis.text.y = element_text(angle = 45),
+        panel.background = element_rect(fill = 'white', color = NA),
+        panel.grid.major.y = element_line(color = 'grey', linetype = 'dotted')
+      )
+    
+    # ----combine map and bar chart ----
+    
+    
+    access_covered <-
+      plot_grid(
+        access_g_add_1hr_pot_w_plot,
+        covered_population_plot,
+        align = "h",
+        axis = "bt",
+        rel_widths = c(1.3, 1)
+      )
+    
+    
+    # ----save combined plots as png ----
+    ggsave(
+      file = paste0("charts/access_g_add_1hr_pot_w_plot_", j, ".png"),
+      plot = access_covered,
+      width = 10,
+      height = 5,
+      units = "in",
+      dpi = 300
+    )
+    
+    # files uploaded to https://ezgif.com/ for animated gif
+    
+  }
+  
+  cat("Completed after ", j, "iterations\n\n")
+  
+  # ----CLEAN UP----
+  # re-initialise values
+  
+  potential_pop_w <- 0
+  r_remaining_pop_w <- pop_mwi_utm_rsmp - r_cnfa_pop_w
+  
+}
+
+
+```
+
+# Purely PostGIS vector solution
+
+## Assess feasibility
 
 Convert raster to centroids
 
