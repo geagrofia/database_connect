@@ -4468,18 +4468,544 @@ if (run_heuristic_w == TRUE) {
 
 # Purely PostGIS vector solution
 
-## Assess feasibility
+## Convert raster to centroids and polygons
 
-Convert raster to centroids
+The rasters for the population and the friction surfaces were converted to centroids and written to postgresql
+
+The maps show a zoom of the area around Lilongwe:
+
+```{r postgresql_pop_points, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Population raster converted to centroids", dev = 'png', results='hide'}
+
+# query to select easting, northing, yield from pg for job
+qry <- sprintf("SELECT  *  FROM COVERAGE.POP_MWI_POINTS")
+
+# fetch data from db,
+pop_mwi_utm_rsmp_postgres <- dbGetQuery(con, qry)
 
 
-Create lines between all centroids - but order by distance and limit to the eight closest
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(pop_mwi_utm_rsmp_postgres$geometry), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+pop_mwi_utm_rsmp_postgres_sdf <-
+  st_set_geometry(pop_mwi_utm_rsmp_postgres, newGeom)
+
+#3. (optional) drop the character format column
+pop_mwi_utm_rsmp_postgres_sdf$geom = NULL
+
+st_crs(pop_mwi_utm_rsmp_postgres_sdf, 32736)
+
+pop_mwi_postgres_plot <- ggplot() +
+  
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(data = pop_mwi_utm_rsmp_postgres_sdf,
+          aes(colour = layer),
+          size = 1,
+          shape = 20) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  ) +
+  scale_colour_gradient(
+    labels = comma,
+    low = 'yellow',
+    high = 'red',
+    na.value = NA,
+    limits = c(0.5, 15000)
+  ) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(575000, 585000)) +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(8440000, 8455000)) +
+  labs(colour = "-------------\nPostGIS\nPopulation\nper 1km\npoint\nZoomed\n-------------")
+
+pop_mwi_postgres_plot
+
+```
+
+```{r postgresql_friction_points, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Bicycle friction raster converted to centroids", dev = 'png', results='hide'}
+
+# query to select centroids
+qry <- sprintf("SELECT  *  FROM COVERAGE.FRICTION_B_POINTS")
+
+# fetch data from db,
+friction_b_postgres <- dbGetQuery(con, qry)
 
 
-Run shortest path analysis from a selected agro-dealer point to all other points
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(friction_b_postgres$geometry), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+friction_b_postgres_sdf <-
+  st_set_geometry(friction_b_postgres, newGeom)
+
+#3. (optional) drop the character format column
+friction_b_postgres_sdf$geom = NULL
+
+st_crs(friction_b_postgres_sdf, 32736)
+
+# query to select raster edges
+qry <- sprintf("SELECT  *  FROM COVERAGE.FRICTION_B_RASTER_EDGES")
+
+# fetch data from db,
+friction_b_edges_postgres <- dbGetQuery(con, qry)
 
 
-Limit results to those that are less than one hour
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(friction_b_edges_postgres$geometry), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+friction_b_edges_postgres_sdf <-
+  st_set_geometry(friction_b_edges_postgres, newGeom)
+
+#3. (optional) drop the character format column
+friction_b_edges_postgres_sdf$geom = NULL
+
+st_crs(friction_b_edges_postgres_sdf, 32736)
+
+# query to select raster vertices
+qry <- sprintf("SELECT  *  FROM COVERAGE.FRICTION_B_RASTER_VERTICES")
+
+# fetch data from db,
+friction_b_vertices_postgres <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(friction_b_vertices_postgres$geometry), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+friction_b_vertices_postgres_sdf <-
+  st_set_geometry(friction_b_vertices_postgres, newGeom)
+
+#3. (optional) drop the character format column
+friction_b_vertices_postgres_sdf$geom = NULL
+
+st_crs(friction_b_vertices_postgres_sdf, 32736)
+
+
+friction_b_postgres_plot <- ggplot() +
+  
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(data = friction_b_edges_postgres_sdf,
+          colour = "grey",
+          size = 0.5) +
+  geom_sf(data = friction_b_vertices_postgres_sdf,
+          colour = "grey",
+          size = 1,
+          shape = 1) +
+  geom_sf(data = friction_b_postgres_sdf,
+          aes(colour = layer),
+          size = 3,
+          shape = 20) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  ) +
+  scale_colour_gradientn(colours = cols,
+                         na.value = NA,
+                         limits = c(0, 3600)) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(575000, 585000)) +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(8440000, 8455000)) +
+  labs(colour = "-------------\nPostGIS\nFriction\nSurface\nBicycles\npoint\nZoomed\n-------------")
+
+friction_b_postgres_plot
+
+```
+
+## Create lines between all centroids 
+
+First the lines between the nearest four raster centroids (white) in the cardinal directions were defined, and then the lines between the nearest four raster vertices in the ordinal directions (grey).
+
+The cost of travelling between centroid x1 and centroid x2 along the cardinal line was (cost x1 + cost x2) / 2 
+
+The cost of travelling between vertex y1 and centroid x1 along the ordinal line was cost x1  * (distance y1-x1 / 1000)
+
+The cardinal and ordinal lines were then combined.
+
+```{r postgresql_lines, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Bicycle friction network", dev = 'png', results='hide'}
+
+# query to select centroids
+qry <- sprintf("SELECT  *  FROM COVERAGE.FRICTION_B_LINES_CARDINAL_NO_DUPES")
+
+# fetch data from db,
+friction_b_lines_c_postgres <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(friction_b_lines_c_postgres$geom), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+friction_b_lines_c_postgres_sdf <-
+  st_set_geometry(friction_b_lines_c_postgres, newGeom)
+
+#3. (optional) drop the character format column
+friction_b_lines_c_postgres_sdf$geom = NULL
+
+st_crs(friction_b_lines_c_postgres_sdf, 32736)
+
+# query to select raster edges
+qry <- sprintf("SELECT  *  FROM COVERAGE.FRICTION_B_LINES_ORDINAL_NO_DUPES")
+
+# fetch data from db,
+friction_b_lines_o_postgres <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(friction_b_lines_o_postgres$geom), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+friction_b_lines_o_postgres_sdf <-
+  st_set_geometry(friction_b_lines_o_postgres, newGeom)
+
+#3. (optional) drop the character format column
+friction_b_lines_o_postgres_sdf$geom = NULL
+
+st_crs(friction_b_lines_o_postgres_sdf, 32736)
+
+
+friction_b_lines_postgres_plot <- ggplot() +
+  
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(data = friction_b_lines_o_postgres_sdf,
+          colour = "grey",
+          size = 0.5) +
+  geom_sf(data = friction_b_lines_c_postgres_sdf,
+          colour = "white",
+          size = 0.5) +
+  geom_sf(data = friction_b_vertices_postgres_sdf,
+          colour = "grey",
+          size = 1,
+          shape = 1) +
+  geom_sf(data = friction_b_postgres_sdf,
+          aes(colour = layer),
+          size = 3,
+          shape = 20) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  ) +
+  scale_colour_gradientn(colours = cols,
+                         na.value = NA,
+                         limits = c(0, 3600)) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(575000, 585000)) +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(8440000, 8455000)) +
+  labs(colour = "-------------\nPostGIS\nFriction\nSurface\nBicycles\nlines\nZoomed\n-------------")
+
+gc()
+friction_b_lines_postgres_plot
+
+```
+
+## Create a network suitable for pgrdijkstra routing algorithm
+
+The prgdijkstra function in the pgrouting extension requires input data with a specific topological structure of nodes and edges.
+
+The nodes are created using the following SQL query:
+
+*select pgr_nodenetwork('COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES', 0.000001, 'comb_id', 'geom', 'noded')*
+ 
+This produces the *COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED* table of edges with the following columns:
+
+* id
+* old_id
+* sub_id
+* source (with null values)
+* target (with null values)
+* geom
+
+The graph network is then created using this SQL query:
+
+*select pgr_createTopology('COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED', 0.000001, 'geom', 'id', 'source', 'target' )*
+
+This produces the *COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED_VERTICES_PGR* table of nodes with the following columns:
+
+* id
+* cnt
+* chk
+* ein
+* eout
+* the_geom
+
+The edge_table will be affected with changes to the source and target column values. 
+
+To complete the network the cost and reverse cost columns and values need to be added to the edges table.
+These costs are the same, and are equivalent to the cost column of combined ordinal and cardinal lines table that I created earlier.
+
+The network can be analysed using the following query:
+
+*select pgr_analyzegraph('COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED', 0.000001,'geom','id','source','target','true')*
+
+This returns an *OK* statement and fills completely the cnt and chk columns of the nodes table.
+
+## Snap agro-dealers to nearest node
+
+The network is now ready for running the pgrdijkstra function but the nodes table needs extra columns with information on the agro-dealers and the population at each node. The population can be added easily because the population points are already located at the node locations. The potential new agro-dealers, however, are not located at the node locations so need to be snapped to the nearest node.
+
+The snapping uses the PostGIS indexes *<->* distance ordering, and the *CROSS JOIN LATERAL* via a new table.
+
+```{r postgresql_snapped_pot_ag_dealers, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "agro-dealers snapped to bicycle friction network", dev = 'png', results='hide'}
+
+# query to select snapped agro-dealers
+qry <- sprintf("SELECT  *  FROM COVERAGE.POT_AG_DEALERS_SNAP")
+
+# fetch data from db,
+snapped_pot_ag_dealers_postgres <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(snapped_pot_ag_dealers_postgres$moved_geom), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+snapped_pot_ag_dealers_postgres_sdf <-
+  st_set_geometry(snapped_pot_ag_dealers_postgres, newGeom)
+
+#3. (optional) drop the character format column
+snapped_pot_ag_dealers_postgres_sdf$geom = NULL
+
+st_crs(snapped_pot_ag_dealers_postgres_sdf, 32736)
+
+
+snapped_pot_ag_dealers_postgres_plot <- ggplot() +
+  
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(data = friction_b_lines_o_postgres_sdf,
+          colour = "grey",
+          size = 0.5) +
+  geom_sf(data = friction_b_lines_c_postgres_sdf,
+          colour = "white",
+          size = 0.5) +
+  geom_sf(
+    data = friction_b_vertices_postgres_sdf,
+    colour = "grey",
+    size = 1,
+    shape = 1
+  ) +
+  geom_sf(data = friction_b_postgres_sdf,
+          aes(colour = layer),
+          size = 3,
+          shape = 20) +
+  geom_sf(
+    data = pot_ag_dealers_sdf,
+    size = 3,
+    aes(fill = "New"),
+    shape = 21,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    data = snapped_pot_ag_dealers_postgres_sdf,
+    size = 3,
+    aes(fill = "Snapped"),
+    shape = 21,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  ) +
+  scale_fill_manual(name = "Agro-Dealers",
+                    values = c("New" = "red",
+                               "Snapped" = "blue")) +
+  scale_colour_gradientn(colours = cols,
+                         na.value = NA,
+                         limits = c(0, 3600)) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(585000, 590000)) +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(8447500, 8455000)) +
+  labs(fill = "-------------\nPostGIS\nFriction\nSurface\nBicycles\nAgro-\n Dealers\nZoomed\n-------------") +
+  labs(colour = "-------------\nPostGIS\nFriction\nSurface\nBicycles\nlines\nZoomed\n-------------") +
+  theme(
+    #panel.background = element_rect(fill = 'white'),
+    #panel.grid.major.x = element_blank(),
+    #panel.grid.major.x = element_line(colour = 'grey'),
+    #panel.grid.minor.x = element_blank(),
+    panel.grid.minor.x = element_line(colour = 'grey'),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.background = element_rect(fill = 'white', color = NA),
+    panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+    panel.grid.minor = element_line(color = 'green', size = 2),
+    legend.key = element_rect(fill = 'white')
+  )
+gc()
+snapped_pot_ag_dealers_postgres_plot
+
+```
+
+
+
+```{r postgresql_full_network, cache=TRUE, fig.height = 5, fig.width = 4, fig.cap = "Agro-dealers and population joined to the network", dev = 'png', results='hide'}
+
+# query to select network nodes
+qry <- sprintf("SELECT  *  FROM COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED_VERTICES_PGR")
+
+# fetch data from db,
+network_nodes_postgres <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(network_nodes_postgres$the_geom), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+network_nodes_postgres_sdf <-
+  st_set_geometry(network_nodes_postgres, newGeom)
+
+#3. (optional) drop the character format column
+network_nodes_postgres_sdf$geom = NULL
+
+st_crs(network_nodes_postgres_sdf, 32736)
+
+# query to select network edges
+qry <- sprintf("SELECT  *  FROM COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED")
+
+# fetch data from db,
+network_edges_postgres <- dbGetQuery(con, qry)
+
+
+# https://stackoverflow.com/questions/58398074/import-csv-with-postgres-geometry-column-as-sf
+
+#1. convert the geometry strings to sf spatial objects:
+newGeom <-
+  st_as_sfc(structure(as.character(network_edges_postgres$geom), class = "WKB"), EWKB =
+              TRUE)
+
+#2. create a new spatial data frame with the new spatial objects as geometry
+network_edges_postgres_sdf <-
+  st_set_geometry(network_edges_postgres, newGeom)
+
+#3. (optional) drop the character format column
+network_edges_postgres_sdf$geom = NULL
+
+st_crs(network_edges_postgres_sdf, 32736)
+
+network_postgres_plot <- ggplot() +
+  
+  geom_sf(data = boundary_mcr_utm,
+          colour = 'grey',
+          size = 2) +
+  geom_sf(data = network_edges_postgres_sdf,
+          aes(colour = cost),
+          size = 1) +
+  geom_sf(data = network_nodes_postgres_sdf,
+          aes(size = pop_b),
+          colour = 'red',
+          fill = 'white',
+          shape = 22,
+          alpha = 0.75) +
+  geom_sf(data = network_nodes_postgres_sdf,
+          aes(shape = ag_new_id),
+          colour = 'blue',
+          fill = 'white',
+          alpha = 0.75) +
+  geom_sf(
+    data = boundary_mcr_dist_utm,
+    fill = NA,
+    colour = 'black',
+    size = 1
+  ) +
+  scale_size_area() +
+  scale_shape_binned(breaks = c(0,Inf)) +
+  scale_colour_gradientn(colours = cols,
+                         na.value = NA,
+                         limits = c(0, 3600)) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(585000, 590000)) +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(8447500, 8455000)) +
+  labs(size = "-------------\nPopulation\nZoomed\n-------------") +
+  labs(shape = "Agro-\nDealers") +
+  labs(colour = "-------------\nFriction\nSurface\nBicycles\n-------------") +
+  theme(
+    #panel.background = element_rect(fill = 'white'),
+    #panel.grid.major.x = element_blank(),
+    #panel.grid.major.x = element_line(colour = 'grey'),
+    #panel.grid.minor.x = element_blank(),
+    panel.grid.minor.x = element_line(colour = 'grey'),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.background = element_rect(fill = 'white', color = NA),
+    panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+    panel.grid.minor = element_line(color = 'green', size = 2),
+    legend.key = element_rect(fill = 'white')
+  )
+gc()
+network_postgres_plot
+
+```
+
+## Run greedy-add heuristic using pgrdijkstra routing algorithm
+
+The pgrouting method in PostgreSQL is more complicated than the gdistance method in R because the path has to be calculated from each populated node to each agro-dealer node individually.
+
+A number of methods were tried. A method that used pgrdijkstra with combination queries (many-to-many) caused memory problems. A different method that used a one-to-many query with temporary tables to store information suffered from problems with transaction locks. Eventually a method of many-to-one path analysis with results and inputs in arrays was successful.
+
+The pgrouting method is similar to the gdistance heuristic and has the following steps:
+
+1.  Declare variables used internally in the functiion
+2.  Add variables to the *COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED_VERTICES_PGR* table for recording the population remaining, the status of the agro-dealer (chosen or not), and the iteration
+3. Start a WHILE loop based on the population target to be reached during the heuristic
+4. Open a cursor with a record for each potential agro-dealer
+5. Start a loop through all cursor records
+6. Get all population source locations within 15km of the target agro-dealer (this is the maximum distance that a source can be from the target given the 15km/hr maximum bicycle speed on roads with no slope) and save in an array
+7. Construct a query in text using a special format function for the arrays to run the pgrdijkstra functiion
+8. Execute the query text to run the pgrdijkstra using the source array (many) and the agro-dealer target array (one) 
+9. Record the population of each source that is within 1 hour of the target in an array
+10. Calculate the sum of the source population for each target agro-dealer and record the maximum population and the target agro-dealer
+11. Finish the loop
+12. Repeat the above loop for just the target agro-dealer (also get the id of each source population point within 1 hour) and update the new columns in the *COVERAGE.FRICTION_B_LINES_COMBINED_NO_DUPES_NODED_VERTICES_PGR* table
+13. Repeat the above as the WHILE loop until the population target is reached and the close loop
 
 
 
